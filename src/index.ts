@@ -22,6 +22,7 @@ Usage:
   claude-azure-pg-mem config set <key> <value>   Set a config value
   claude-azure-pg-mem config get <key>            Get a config value
   claude-azure-pg-mem config list                 List all settings
+  claude-azure-pg-mem db provision [flags]          Provision Azure PostgreSQL server
   claude-azure-pg-mem db push                     Push schema to database
   claude-azure-pg-mem db status                   Check DB connection & table counts
   claude-azure-pg-mem db embedding-test           Test configured embedding provider
@@ -96,6 +97,13 @@ async function main(): Promise<void> {
 
     // ---- db -------------------------------------------------------------
     case 'db': {
+      if (sub === 'provision') {
+        const { provision, parseProvisionArgs } = await import('./cli/commands/provision.js');
+        const provisionOpts = parseProvisionArgs(args.slice(2));
+        await provision(provisionOpts);
+        return;
+      }
+
       if (sub === 'push') {
         const { pushSchema } = await import('./cli/commands/schema-push.js');
         await pushSchema();
@@ -115,7 +123,7 @@ async function main(): Promise<void> {
       }
 
       console.error(`Unknown db subcommand: ${sub}`);
-      console.error('Valid subcommands: push, status, embedding-test');
+      console.error('Valid subcommands: provision, push, status, embedding-test');
       process.exitCode = 1;
       return;
     }

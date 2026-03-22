@@ -39,26 +39,54 @@ Captures tool usage observations during sessions, generates semantic summaries, 
 ## Prerequisites
 
 - **Node.js 22+**
-- **Azure PostgreSQL Flexible Server** with `pgvector` and `vector` extensions enabled
-  - Azure Portal → your Postgres server → Server parameters → search `azure.extensions` → enable `VECTOR`
-  - Or via Azure CLI:
-    ```bash
-    az postgres flexible-server parameter set \
-      --resource-group <rg> --server-name <server> \
-      --name azure.extensions --value VECTOR
-    ```
+- **Azure CLI** (`az`) — required for `db provision` command
+  - Install: https://learn.microsoft.com/cli/azure/install-azure-cli
+  - Login: `az login`
 
 ## Quick Start
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/your-org/claude-azure-postgres-memory.git
-cd claude-azure-postgres-memory
+git clone https://github.com/msftse/azure-pg-agent-mem.git
+cd azure-pg-agent-mem
 npm install
 ```
 
-### 2. Configure the database connection
+### 2. Provision the database (automated)
+
+One command creates the Azure PostgreSQL server, enables pgvector, creates the database, adds firewall rules, saves `DATABASE_URL`, and pushes the schema:
+
+```bash
+npx tsx src/index.ts db provision
+```
+
+This uses sensible defaults (B1ms SKU, eastus, PostgreSQL 16). Customize with flags:
+
+```bash
+npx tsx src/index.ts db provision \
+  --name my-agent-mem-pg \
+  --resource-group rg-my-team \
+  --location westus3 \
+  --admin-user myadmin \
+  --sku Standard_B2s
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `agent-mem-pg-<random>` | Server name (globally unique) |
+| `--resource-group`, `--rg` | `rg-agent-mem` | Resource group (created if needed) |
+| `--location`, `--loc` | `eastus` | Azure region |
+| `--admin-user` | `agentmemadmin` | Admin username |
+| `--admin-password` | (auto-generated) | Admin password |
+| `--sku` | `Standard_B1ms` | PostgreSQL SKU |
+| `--database`, `--db` | `agent_memory` | Database name |
+| `--no-push` | — | Skip schema push |
+
+<details>
+<summary>Manual setup (without <code>db provision</code>)</summary>
+
+If you already have an Azure PostgreSQL server, configure the connection manually:
 
 ```bash
 # Option A: Environment variable
@@ -68,27 +96,33 @@ export DATABASE_URL="postgres://user:password@your-server.postgres.database.azur
 npx tsx src/index.ts config set DATABASE_URL "postgres://user:password@your-server.postgres.database.azure.com:5432/agent_memory?sslmode=require"
 ```
 
-### 3. Push the schema
+Enable pgvector on your server:
+```bash
+az postgres flexible-server parameter set \
+  --resource-group <rg> --server-name <server> \
+  --name azure.extensions --value VECTOR
+```
 
-Creates tables, pgvector extension, indexes, and RLS policies:
-
+Push the schema:
 ```bash
 npx tsx src/index.ts db push
 ```
 
-### 4. Verify the connection
+</details>
+
+### 3. Verify the connection
 
 ```bash
 npx tsx src/index.ts db status
 ```
 
-### 5. Start the worker daemon
+### 4. Start the worker daemon
 
 ```bash
 npx tsx src/index.ts start
 ```
 
-### 6. Install as a Claude Code plugin (optional)
+### 5. Install as a Claude Code plugin (optional)
 
 ```bash
 npx tsx src/index.ts install
@@ -183,6 +217,7 @@ Settings are stored in `~/.agent-mem/settings.json`.
 claude-azure-pg-mem config set <key> <value>   Set a config value
 claude-azure-pg-mem config get <key>            Get a config value
 claude-azure-pg-mem config list                 List all settings
+claude-azure-pg-mem db provision [flags]        Provision Azure PostgreSQL server
 claude-azure-pg-mem db push                     Push schema to database
 claude-azure-pg-mem db status                   Check DB connection & table counts
 claude-azure-pg-mem db embedding-test           Test configured embedding provider
@@ -217,7 +252,7 @@ CREATE POLICY cpm_sessions_tenant ON cpm_sessions
   USING (user_id = current_setting('app.user_id', true));
 ```
 
-The worker sets `SET LOCAL app.user_id = '<hash>'` inside every transaction via `withUserContext()`. This is transaction-scoped, so it's safe with connection pooling.
+The worker sets `app.user_id` via `SELECT set_config('app.user_id', '<hash>', true)` inside every transaction via `withUserContext()`. This is transaction-scoped, so it's safe with connection pooling.
 
 User IDs are auto-derived from `SHA-256(os.username@os.hostname)` or set explicitly via `AGENT_MEM_USER_ID`.
 
