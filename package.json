@@ -1,6 +1,6 @@
 {
   "name": "claude-azure-pg-mem",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Azure Postgres persistent memory for coding agents (OpenCode, Claude Code, GitHub Copilot CLI) with multi-tenant Row Level Security",
   "type": "module",
   "main": "dist/index.js",

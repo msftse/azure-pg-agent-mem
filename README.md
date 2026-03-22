@@ -4,46 +4,75 @@
   <img src="assets/postgresql-logo.svg" alt="PostgreSQL" height="80" />
 </p>
 
-# claude-azure-pg-mem
+<h1 align="center">Azure PostgreSQL Agent Memory</h1>
 
-Multi-tenant persistent memory for coding agents (OpenCode, Claude Code, GitHub Copilot CLI) backed by **Azure PostgreSQL Flexible Server** with **pgvector**.
+<p align="center">
+  Multi-tenant persistent memory for AI coding agents, backed by Azure PostgreSQL Flexible Server with pgvector.
+</p>
 
-Captures tool usage observations during sessions, generates semantic summaries, and makes them searchable across sessions and machines. Multiple users share the same Postgres instance, isolated by **Row Level Security (RLS)**.
+<p align="center">
+  <a href="https://github.com/msftse/azure-pg-agent-mem/releases"><img src="https://img.shields.io/github/v/release/msftse/azure-pg-agent-mem?style=flat-square&label=release" alt="Release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/msftse/azure-pg-agent-mem?style=flat-square" alt="License" /></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen?style=flat-square" alt="Node.js" /></a>
+  <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/TypeScript-5.9-blue?style=flat-square" alt="TypeScript" /></a>
+  <a href="https://learn.microsoft.com/azure/postgresql/"><img src="https://img.shields.io/badge/Azure-PostgreSQL%20Flexible%20Server-0078D4?style=flat-square&logo=microsoft-azure" alt="Azure PostgreSQL" /></a>
+</p>
+
+---
+
+## Overview
+
+Azure PostgreSQL Agent Memory captures tool usage observations from AI coding agent sessions, generates semantic summaries, and makes them searchable across sessions, projects, and machines. It is designed for teams where multiple engineers share a single Azure PostgreSQL instance, with each user's data isolated via **Row Level Security (RLS)**.
+
+### Supported Agents
+
+| Agent | Integration | Auto-Capture |
+|-------|-------------|-------------|
+| [OpenCode](https://opencode.ai) | MCP server + Plugin | Tool calls, session lifecycle |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | MCP server + Hooks | Tool calls, session lifecycle |
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot) | MCP server | Manual search only |
+
+### Key Features
+
+- **Hybrid search** — pgvector semantic similarity + PostgreSQL full-text search (tsvector), combined with configurable ranking
+- **Multi-tenant Row Level Security** — every table has a `user_id` column enforced by PostgreSQL RLS policies; users cannot access each other's data even when sharing the same database
+- **Configurable embeddings** — local [Nomic Embed Text v1](https://huggingface.co/nomic-ai/nomic-embed-text-v1) (768-dim, no API key) or [Azure OpenAI](https://learn.microsoft.com/azure/ai-services/openai/concepts/models#embeddings) with Entra ID or API key authentication
+- **Progressive disclosure** — 3-layer MCP tool design (search, timeline, get_observations) that minimizes token usage by 10x compared to fetching full details upfront
+- **One-command provisioning** — `db provision` creates the Azure PostgreSQL server, enables pgvector, pushes the schema, and saves the connection string
+- **Session lifecycle tracking** — automatic session creation, observation recording, completion, and summarization
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Coding Agent (OpenCode / Claude Code / Copilot CLI)    │
-│                                                         │
-│  ┌──────────────┐    ┌──────────────┐                   │
-│  │  MCP Server  │───▶│    Worker    │                   │
-│  │  (stdio)     │    │  (HTTP :37778)│                  │
-│  │  3 tools     │    │  Express API │                   │
-│  └──────────────┘    └──────┬───────┘                   │
-│                             │ withUserContext()          │
-│                             │ SET LOCAL app.user_id      │
-│                      ┌──────▼───────┐                   │
-│                      │ Azure Postgres│                  │
-│                      │ + pgvector   │                   │
-│                      │ + RLS        │                   │
-│                      └──────────────┘                   │
-└─────────────────────────────────────────────────────────┘
+Coding Agent (OpenCode / Claude Code / Copilot CLI)
+
+  ┌──────────────┐    ┌──────────────────┐
+  │  MCP Server  │───>│     Worker       │
+  │  (stdio)     │    │  (HTTP :37778)   │
+  │  3 tools     │    │  Express API     │
+  └──────────────┘    └────────┬─────────┘
+                               │ withUserContext()
+                               │ set_config('app.user_id', ...)
+                        ┌──────▼──────────┐
+                        │ Azure PostgreSQL│
+                        │ Flexible Server │
+                        │ + pgvector      │
+                        │ + RLS           │
+                        └─────────────────┘
 ```
 
 **MCP Tools** (progressive disclosure):
-1. `search` — lightweight results (~50-100 tokens each)
-2. `timeline` — medium context (~200-500 tokens)
-3. `get_observations` — full details (~500-1000 tokens each)
+1. **`search`** — lightweight results (~50-100 tokens each)
+2. **`timeline`** — session timelines (~200-500 tokens)
+3. **`get_observations`** — full observation details (~500-1000 tokens each)
 
 ## Prerequisites
 
-- **Node.js 22+**
-- **Azure CLI** (`az`) — required for `db provision` command
-  - Install: https://learn.microsoft.com/cli/azure/install-azure-cli
-  - Login: `az login`
+- **Node.js 22+** — [Download](https://nodejs.org)
+- **Azure CLI** (`az`) — [Install](https://learn.microsoft.com/cli/azure/install-azure-cli) and run `az login`
+- **Azure subscription** — [Free account](https://azure.microsoft.com/free) works (B1ms PostgreSQL is free for 12 months)
 
-## Quick Start
+## Getting Started
 
 ### 1. Clone and install
 
@@ -53,7 +82,7 @@ cd azure-pg-agent-mem
 npm install
 ```
 
-### 2. Provision the database (automated)
+### 2. Provision the database
 
 One command creates the Azure PostgreSQL server, enables pgvector, creates the database, adds firewall rules, saves `DATABASE_URL`, and pushes the schema:
 
@@ -61,7 +90,7 @@ One command creates the Azure PostgreSQL server, enables pgvector, creates the d
 npx tsx src/index.ts db provision
 ```
 
-This uses sensible defaults (B1ms SKU, eastus, PostgreSQL 16). Customize with flags:
+Defaults: B1ms SKU, eastus region, PostgreSQL 16. Customize with flags:
 
 ```bash
 npx tsx src/index.ts db provision \
@@ -84,9 +113,7 @@ npx tsx src/index.ts db provision \
 | `--no-push` | — | Skip schema push |
 
 <details>
-<summary>Manual setup (without <code>db provision</code>)</summary>
-
-If you already have an Azure PostgreSQL server, configure the connection manually:
+<summary>Manual setup (use an existing Azure PostgreSQL server)</summary>
 
 ```bash
 # Option A: Environment variable
@@ -97,6 +124,7 @@ npx tsx src/index.ts config set DATABASE_URL "postgres://user:password@your-serv
 ```
 
 Enable pgvector on your server:
+
 ```bash
 az postgres flexible-server parameter set \
   --resource-group <rg> --server-name <server> \
@@ -104,6 +132,7 @@ az postgres flexible-server parameter set \
 ```
 
 Push the schema:
+
 ```bash
 npx tsx src/index.ts db push
 ```
@@ -124,10 +153,9 @@ npx tsx src/index.ts start
 
 ### 5. Install for your coding agent
 
-<details open>
-<summary><strong>OpenCode</strong></summary>
+#### OpenCode
 
-**a) MCP server** (memory search tools — already configured if you followed step 4):
+**a) MCP server** — provides memory search tools to the agent:
 
 Add to `~/.config/opencode/config.json`:
 
@@ -143,153 +171,76 @@ Add to `~/.config/opencode/config.json`:
 }
 ```
 
-**b) Plugin** (auto-captures observations from every tool call):
+**b) Plugin** — auto-captures observations from every tool call:
 
 ```bash
-# Create the global plugins directory
 mkdir -p ~/.config/opencode/plugins
-
-# Copy the plugin file
 cp plugin/opencode/agent-mem.ts ~/.config/opencode/plugins/agent-mem.ts
 ```
 
-Restart OpenCode for the plugin to take effect. Every non-trivial tool call will be automatically persisted to your memory database.
+Restart OpenCode for the plugin to take effect.
 
-**Environment overrides** (optional):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AGENT_MEM_WORKER_HOST` | `127.0.0.1` | Worker hostname |
-| `AGENT_MEM_WORKER_PORT` | `37778` | Worker port |
-| `AGENT_MEM_USER_ID` | auto | Override auto-derived user ID |
-
-</details>
-
-<details>
-<summary><strong>Claude Code</strong></summary>
+#### Claude Code
 
 ```bash
 npx tsx src/index.ts install
 ```
 
-This copies the `plugin/` directory to `~/.claude/plugins/agent-mem/`, registering:
-- **Hooks** for session lifecycle (auto-capture observations)
-- **MCP server** for memory search tools
-- **Skill** (`mem-search`) for agents to discover and use
-
-</details>
+This registers hooks for session lifecycle, the MCP server for search tools, and the `mem-search` skill.
 
 ## Configuration
 
 All settings can be set via environment variables (prefixed with `AGENT_MEM_`) or through the CLI:
 
+```bash
+npx tsx src/index.ts config set <KEY> <value>
+npx tsx src/index.ts config get <KEY>
+npx tsx src/index.ts config list
+```
+
+Settings are stored in `~/.agent-mem/settings.json`.
+
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `DATABASE_URL` | `DATABASE_URL` | — | Azure Postgres connection string |
+| `DATABASE_URL` | `DATABASE_URL` | — | Azure PostgreSQL connection string |
 | `WORKER_PORT` | `AGENT_MEM_WORKER_PORT` | `37778` | Worker HTTP port |
+| `WORKER_HOST` | `AGENT_MEM_WORKER_HOST` | `127.0.0.1` | Worker bind address |
 | `LOG_LEVEL` | `AGENT_MEM_LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARN, ERROR) |
 | `USER_ID` | `AGENT_MEM_USER_ID` | auto | User ID for RLS (auto = SHA-256 of `user@hostname`) |
 
 ### Embedding Providers
 
-By default, embeddings are generated locally using **Nomic Embed Text v1** (768 dimensions, no API key needed). You can switch to **Azure OpenAI** embeddings for potentially higher quality at the cost of an API call.
+By default, embeddings are generated locally using **Nomic Embed Text v1** (768 dimensions, no API key needed). You can switch to **Azure OpenAI** for higher quality.
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
 | `EMBEDDING_PROVIDER` | `AGENT_MEM_EMBEDDING_PROVIDER` | `nomic` | `nomic`, `azure_openai`, or `noop` |
 | `EMBEDDING_DIMENSIONS` | `AGENT_MEM_EMBEDDING_DIMENSIONS` | `768` | Must match DB vector(N) column |
 | `AZURE_OPENAI_ENDPOINT` | `AGENT_MEM_AZURE_OPENAI_ENDPOINT` | — | e.g. `https://<resource>.cognitiveservices.azure.com` |
-| `AZURE_OPENAI_API_KEY` | `AGENT_MEM_AZURE_OPENAI_API_KEY` | — | API key (optional — omit for Entra ID auth) |
+| `AZURE_OPENAI_API_KEY` | `AGENT_MEM_AZURE_OPENAI_API_KEY` | — | API key (omit for Entra ID auth) |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `AGENT_MEM_AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | — | Deployment name |
 | `AZURE_OPENAI_API_VERSION` | `AGENT_MEM_AZURE_OPENAI_API_VERSION` | `2024-06-01` | API version |
 
-**Authentication for Azure OpenAI:**
+**Entra ID / AAD (recommended):** Omit `AZURE_OPENAI_API_KEY`. The system uses `DefaultAzureCredential` from `@azure/identity`, which auto-chains Azure CLI login, managed identity, and environment credentials. Tokens are cached and refreshed automatically.
 
-Two auth modes are supported:
-
-- **Entra ID / AAD (recommended):** Omit `AZURE_OPENAI_API_KEY`. The system uses `DefaultAzureCredential` from `@azure/identity`, which auto-chains: Azure CLI login → managed identity → environment variables. Tokens are cached and refreshed automatically. Works with Azure OpenAI resources that have `disableLocalAuth = true`.
-
-- **API key:** Set `AZURE_OPENAI_API_KEY` to your key. Simpler but less secure.
-
-**Switching to Azure OpenAI (Entra ID auth):**
+**API key:** Set `AZURE_OPENAI_API_KEY`. Simpler but less secure.
 
 ```bash
+# Switch to Azure OpenAI (Entra ID)
 npx tsx src/index.ts config set EMBEDDING_PROVIDER azure_openai
 npx tsx src/index.ts config set AZURE_OPENAI_ENDPOINT "https://your-resource.cognitiveservices.azure.com"
 npx tsx src/index.ts config set AZURE_OPENAI_EMBEDDING_DEPLOYMENT "text-embedding-3-small"
-# No API key needed — uses 'az login' or managed identity
-
-# Verify it works
 npx tsx src/index.ts db embedding-test
-```
 
-**Switching to Azure OpenAI (API key auth):**
-
-```bash
-npx tsx src/index.ts config set EMBEDDING_PROVIDER azure_openai
-npx tsx src/index.ts config set AZURE_OPENAI_ENDPOINT "https://your-resource.openai.azure.com"
-npx tsx src/index.ts config set AZURE_OPENAI_API_KEY "your-key"
-npx tsx src/index.ts config set AZURE_OPENAI_EMBEDDING_DEPLOYMENT "text-embedding-3-small"
-
-# Verify it works
-npx tsx src/index.ts db embedding-test
-```
-
-The Azure OpenAI API supports a `dimensions` parameter, so models like `text-embedding-3-small` (natively 1536-dim) will truncate their output to 768-dim to match the DB schema. No column migration needed.
-
-**Switching back to local Nomic:**
-
-```bash
+# Switch back to local Nomic
 npx tsx src/index.ts config set EMBEDDING_PROVIDER nomic
-npx tsx src/index.ts db embedding-test
 ```
 
-```bash
-# Set a value
-npx tsx src/index.ts config set WORKER_PORT 37779
-
-# Get a value
-npx tsx src/index.ts config get WORKER_PORT
-
-# List all settings
-npx tsx src/index.ts config list
-```
-
-Settings are stored in `~/.agent-mem/settings.json`.
-
-## CLI Reference
-
-```
-claude-azure-pg-mem config set <key> <value>   Set a config value
-claude-azure-pg-mem config get <key>            Get a config value
-claude-azure-pg-mem config list                 List all settings
-claude-azure-pg-mem db provision [flags]        Provision Azure PostgreSQL server
-claude-azure-pg-mem db push                     Push schema to database
-claude-azure-pg-mem db status                   Check DB connection & table counts
-claude-azure-pg-mem db embedding-test           Test configured embedding provider
-claude-azure-pg-mem install                     Register as Claude Code plugin
-claude-azure-pg-mem uninstall                   Remove plugin registration
-claude-azure-pg-mem start                       Start worker daemon
-claude-azure-pg-mem stop                        Stop worker daemon
-claude-azure-pg-mem status                      Show worker status
-claude-azure-pg-mem hook <adapter> <handler>    Called by Claude Code hooks
-```
-
-## Building
-
-```bash
-# TypeScript compilation (ESM output to dist/)
-npm run build
-
-# Self-contained CJS bundles for plugin distribution
-npm run build:plugin
-# → dist/plugin/worker-service.cjs
-# → dist/plugin/mcp-server.cjs
-```
+> **Note:** The Azure OpenAI API supports a `dimensions` parameter, so `text-embedding-3-small` (natively 1536-dim) truncates its output to 768-dim to match the database schema. No migration is needed.
 
 ## Multi-Tenant Security
 
-Every table has a `user_id` column. PostgreSQL Row Level Security policies enforce that each query only sees rows matching the current user:
+Every table includes a `user_id` column. PostgreSQL Row Level Security policies enforce that each query only sees rows matching the current user:
 
 ```sql
 -- Applied automatically by `db push`
@@ -298,9 +249,9 @@ CREATE POLICY cpm_sessions_tenant ON cpm_sessions
   USING (user_id = current_setting('app.user_id', true));
 ```
 
-The worker sets `app.user_id` via `SELECT set_config('app.user_id', '<hash>', true)` inside every transaction via `withUserContext()`. This is transaction-scoped, so it's safe with connection pooling.
+The worker sets `app.user_id` via `SELECT set_config('app.user_id', '<hash>', true)` inside every transaction. This is transaction-scoped and safe with connection pooling.
 
-User IDs are auto-derived from `SHA-256(os.username@os.hostname)` or set explicitly via `AGENT_MEM_USER_ID`.
+User IDs are auto-derived from `SHA-256(os.username@os.hostname)` (truncated to 16 hex characters) or set explicitly via `AGENT_MEM_USER_ID`.
 
 ## Database Schema
 
@@ -308,129 +259,117 @@ Seven tables with `cpm_` prefix:
 
 | Table | Purpose |
 |-------|---------|
-| `cpm_sessions` | Session lifecycle (start/end, project, cost) |
-| `cpm_sdk_sessions` | SDK session correlation |
-| `cpm_observations` | Tool call observations (pgvector embeddings) |
-| `cpm_session_summaries` | AI-generated session summaries |
+| `cpm_sessions` | Session metadata (project, timestamps, source) |
+| `cpm_sdk_sessions` | Session lifecycle (status, prompts, completion) |
+| `cpm_observations` | Tool call observations with pgvector embeddings |
+| `cpm_session_summaries` | AI-generated structured session summaries |
 | `cpm_pending_messages` | Queue for async processing |
 | `cpm_user_prompts` | User prompt history |
 | `cpm_schema_versions` | Schema migration tracking |
 
-All tables use HNSW indexes on vector columns (768 dims, Nomic Embed Text v1) and GIN indexes on tsvector columns for hybrid search.
+All vector columns use HNSW indexes (768-dim) and GIN indexes on tsvector columns for hybrid search.
 
-## For OpenCode / Agent Skill
+## CLI Reference
 
-The `plugin/skills/mem-search/SKILL.md` teaches agents when and how to search memory using a 3-layer progressive disclosure workflow:
-
-1. **Search** — get an index of matching results with IDs
-2. **Timeline** — view session timelines for context
-3. **Get Observations** — fetch full details for specific IDs
-
-Agents are instructed to never fetch full details without filtering first (10x token savings).
+```
+agent-mem config set <key> <value>    Set a config value
+agent-mem config get <key>             Get a config value
+agent-mem config list                  List all settings
+agent-mem db provision [flags]         Provision Azure PostgreSQL server
+agent-mem db push                      Push schema to database
+agent-mem db status                    Check DB connection and table counts
+agent-mem db embedding-test            Test configured embedding provider
+agent-mem install                      Register as Claude Code plugin
+agent-mem uninstall                    Remove plugin registration
+agent-mem start                        Start worker daemon
+agent-mem stop                         Stop worker daemon
+agent-mem status                       Show worker status
+```
 
 ## Development
 
 ```bash
-# Run in development mode (hot reload)
-npm run dev
+# TypeScript compilation (ESM output to dist/)
+npm run build
 
-# Worker with hot reload
-npm run worker:dev
+# Self-contained CJS bundles for plugin distribution
+npm run build:plugin
+
+# Development mode with hot reload
+npm run dev
 
 # Type checking
 npm run lint
 ```
 
-## Cost Breakdown
+## Cost Estimates
 
-### Scenario A: Solo Developer (Local Nomic Embeddings)
+### Solo Developer (Local Nomic Embeddings)
 
 | Component | Monthly Cost | Notes |
 |-----------|-------------|-------|
 | Azure PostgreSQL Flexible Server (B1ms) | ~$16 | Burstable, 1 vCore, 2 GiB RAM |
 | Storage (32 GiB Premium SSD) | included | Included in base price |
-| Backup (7 days, LRS) | included | LRS backup at no extra cost |
 | Embedding generation | $0.00 | Runs locally via `@huggingface/transformers` |
 | **Total** | **~$16/month** | |
 
-The B1ms is eligible for the [Azure free account](https://learn.microsoft.com/azure/postgresql/configure-maintain/how-to-deploy-on-azure-free-account) (750 hours/month + 32 GB storage free for 12 months).
+B1ms is eligible for the [Azure free account](https://learn.microsoft.com/azure/postgresql/flexible-server/how-to-deploy-on-azure-free-account) (750 hours/month + 32 GB storage free for 12 months).
 
-### Scenario B: 10 Engineers, Active Claude Code Usage
+### Team of 10 Engineers
 
-This is the realistic team scenario — 10 developers each running multiple Claude Code sessions daily, all writing to the shared database.
+| Component | B1ms | B2s |
+|-----------|------|-----|
+| Compute | ~$16/mo | ~$32/mo |
+| Azure OpenAI embeddings (optional) | ~$0.50/mo | ~$0.50/mo |
+| **Total** | **~$16-17/mo** | **~$32-33/mo** |
+| **Per engineer** | **~$1.60/mo** | **~$3.20/mo** |
 
-**Usage assumptions per engineer per day:**
-- ~8 Claude Code sessions
-- ~30 observations per session (tool calls, file reads, edits)
-- ~15 memory searches per day
+Storage growth is approximately 250-370 MB/month for 10 active engineers (~53K observations/month). A 32 GB database lasts 3-7 years at this rate.
 
-**Monthly totals (10 engineers, ~22 working days):**
+<details>
+<summary>Scaling reference</summary>
 
-| Metric | Per Engineer/Day | 10 Engineers/Month |
-|--------|-----------------|-------------------|
-| Sessions | ~8 | ~1,760 |
-| Observations | ~240 | ~52,800 |
-| Session summaries | ~8 | ~1,760 |
-| Embedding calls (writes) | ~248 | ~54,560 |
-| Search queries | ~15 | ~3,300 |
+| SKU | vCores | RAM | Max Connections | Monthly Cost | Team Size |
+|-----|--------|-----|-----------------|-------------|-----------|
+| B1ms | 1 | 2 GiB | 35 | ~$16 | 1-10 |
+| B2s | 2 | 4 GiB | 414 | ~$32 | 10-50 |
+| B2ms | 2 | 8 GiB | 844 | ~$50 | 50-100 |
+| D2ds_v5 | 2 | 8 GiB | 844 | ~$125 | Production |
 
-**Storage growth estimate:**
+Reserved instances (1-year: ~40% savings, 3-year: ~60% savings).
 
-Each observation row uses ~4-7 KB (768-dim vector = 3 KB + text + tsvector + indexes):
+</details>
 
-| Timeframe | New Observations | Storage Growth | Cumulative |
-|-----------|-----------------|----------------|------------|
-| 1 month | ~53K | ~250-370 MB | ~370 MB |
-| 6 months | ~317K | ~1.5-2.2 GB | ~2.2 GB |
-| 12 months | ~634K | ~3-4.4 GB | ~4.4 GB |
-| 24 months | ~1.27M | ~6-8.9 GB | ~8.9 GB |
+## Resources
 
-With 32 GB storage, a 10-person team has **3-7 years** before hitting the storage limit — and storage can be scaled up online without downtime.
+- [Azure PostgreSQL Flexible Server documentation](https://learn.microsoft.com/azure/postgresql/flexible-server/)
+- [pgvector extension on Azure](https://learn.microsoft.com/azure/postgresql/flexible-server/how-to-use-pgvector)
+- [Azure OpenAI Embeddings](https://learn.microsoft.com/azure/ai-services/openai/concepts/models#embeddings)
+- [Model Context Protocol (MCP)](https://modelcontextprotocol.io)
+- [OpenCode plugin documentation](https://opencode.ai/docs/plugins)
 
-**Connection capacity:**
+## Contributing
 
-B1ms has 50 max connections (35 usable after PostgreSQL reserves 15). The worker daemon uses a connection pool:
+This project welcomes contributions and suggestions. Most contributions require you to agree to a
+Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
+the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
 
-| Setup | Connections Used | B1ms (35 avail) | B2s (414 avail) |
-|-------|-----------------|-----------------|-----------------|
-| 1 worker, pool=5 | 5 | OK | OK |
-| 2 workers (HA), pool=5 each | 10 | OK | OK |
-| 10 workers (1 per engineer), pool=3 each | 30 | Tight | OK |
+When you submit a pull request, a CLA bot will automatically determine whether you need to provide
+a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
+provided by the bot. You will only need to do this once across all repos using our CLA.
 
-For a shared worker (recommended architecture), B1ms is sufficient for 10 engineers. Each engineer's agent connects to the same worker over HTTP — the worker manages the DB pool. Only scale up if running per-engineer worker instances.
+This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
+For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
+contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
-**Monthly cost — 10 engineers:**
+## Trademarks
 
-| Component | B1ms | B2s (if needed) |
-|-----------|------|-----------------|
-| Compute | ~$16 | ~$32 |
-| Azure OpenAI embeddings (optional) | ~$0.50 | ~$0.50 |
-| **Total (local Nomic)** | **~$16** | **~$32** |
-| **Total (Azure OpenAI)** | **~$17** | **~$33** |
-| **Per engineer/month** | **~$1.60** | **~$3.20** |
-
-Embedding costs are negligible even at scale — text-embedding-3-small costs $0.02/1M tokens, and 55K observations/month is only ~27M tokens (~$0.54).
-
-### Scaling Reference
-
-| SKU | vCores | RAM | Max User Connections | Monthly Cost | Good For |
-|-----|--------|-----|---------------------|-------------|----------|
-| B1ms | 1 | 2 GiB | 35 | ~$16 | 1-10 engineers (shared worker) |
-| B2s | 2 | 4 GiB | 414 | ~$32 | 10-50 engineers |
-| B2ms | 2 | 8 GiB | 844 | ~$50 | 50-100 engineers |
-| D2ds_v5 (Gen Purpose) | 2 | 8 GiB | 844 | ~$125 | Production, sustained load |
-
-For reserved instances: 1-year commitment saves ~40%, 3-year saves ~60%.
-
-### Cost Optimization Tips
-
-1. **Use Azure Free Account** — B1ms + 32 GB storage is free for 12 months
-2. **Use local Nomic embeddings** (default) — eliminates embedding API costs entirely
-3. **Shared worker architecture** — one worker daemon per team, not per engineer
-4. **Stop the server when not in use** — Burstable instances can be stopped to pause compute charges
-5. **Reserved pricing** — commit for 1-3 years for significant savings on production deployments
-6. **Data retention** — implement observation pruning for old sessions to manage storage growth
+This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
+trademarks or logos is subject to and must follow
+[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
+Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
+Any use of third-party trademarks or logos are subject to those third-party's policies.
 
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).
