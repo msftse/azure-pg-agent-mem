@@ -122,7 +122,51 @@ npx tsx src/index.ts db status
 npx tsx src/index.ts start
 ```
 
-### 5. Install as a Claude Code plugin (optional)
+### 5. Install for your coding agent
+
+<details open>
+<summary><strong>OpenCode</strong></summary>
+
+**a) MCP server** (memory search tools — already configured if you followed step 4):
+
+Add to `~/.config/opencode/config.json`:
+
+```json
+{
+  "mcp": {
+    "agent-mem": {
+      "type": "local",
+      "command": ["npx", "tsx", "<path-to-repo>/src/servers/mcp-server.ts"],
+      "enabled": true
+    }
+  }
+}
+```
+
+**b) Plugin** (auto-captures observations from every tool call):
+
+```bash
+# Create the global plugins directory
+mkdir -p ~/.config/opencode/plugins
+
+# Copy the plugin file
+cp plugin/opencode/agent-mem.ts ~/.config/opencode/plugins/agent-mem.ts
+```
+
+Restart OpenCode for the plugin to take effect. Every non-trivial tool call will be automatically persisted to your memory database.
+
+**Environment overrides** (optional):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_MEM_WORKER_HOST` | `127.0.0.1` | Worker hostname |
+| `AGENT_MEM_WORKER_PORT` | `37778` | Worker port |
+| `AGENT_MEM_USER_ID` | auto | Override auto-derived user ID |
+
+</details>
+
+<details>
+<summary><strong>Claude Code</strong></summary>
 
 ```bash
 npx tsx src/index.ts install
@@ -132,6 +176,8 @@ This copies the `plugin/` directory to `~/.claude/plugins/agent-mem/`, registeri
 - **Hooks** for session lifecycle (auto-capture observations)
 - **MCP server** for memory search tools
 - **Skill** (`mem-search`) for agents to discover and use
+
+</details>
 
 ## Configuration
 
