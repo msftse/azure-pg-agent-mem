@@ -227,8 +227,11 @@ export class WorkerService {
           offset = '0',
           dateStart,
           dateEnd,
-          orderBy = 'date_desc',
+          orderBy: rawOrderBy,
         } = req.query as Record<string, string | undefined>;
+
+        // Default to relevance-ranked results when a search query is present.
+        const orderBy = rawOrderBy || (query ? 'relevance' : 'date_desc');
 
         const result = await withUserContext(pool, userId, async (client) => {
           // Build the WHERE clauses dynamically.

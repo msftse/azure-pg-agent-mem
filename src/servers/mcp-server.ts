@@ -206,10 +206,16 @@ server.tool(
     orderBy: z
       .string()
       .optional()
-      .default('date_desc')
-      .describe('Sort order: date_desc, date_asc, relevance'),
+      .describe('Sort order: date_desc, date_asc, relevance. Defaults to relevance when query is provided, date_desc otherwise.'),
   },
-  async (params) => callWorkerAPI('/api/search', params),
+  async (params) => {
+    // Auto-default to relevance ordering when a query is provided.
+    const effectiveParams = { ...params };
+    if (params.query && !params.orderBy) {
+      effectiveParams.orderBy = 'relevance';
+    }
+    return callWorkerAPI('/api/search', effectiveParams);
+  },
 );
 
 // ── Tool 2: timeline ────────────────────────────────────────────────────────
