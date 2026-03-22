@@ -1,7 +1,21 @@
 <p align="center">
-  <img src="assets/azure-logo.svg" alt="Microsoft Azure" height="80" />
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="assets/postgresql-logo.svg" alt="PostgreSQL" height="80" />
+  <img src="assets/azure-logo.svg" alt="Microsoft Azure" height="64" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/postgresql-logo.svg" alt="PostgreSQL" height="64" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/pgvector-logo.svg" alt="pgvector" height="40" />
+</p>
+
+<p align="center">
+  <em>Works with</em>
+</p>
+
+<p align="center">
+  <img src="assets/opencode-logo.svg" alt="OpenCode" height="28" />
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/claude-logo.svg" alt="Claude Code" height="28" />
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/github-copilot-logo.svg" alt="GitHub Copilot" height="28" />
 </p>
 
 <h1 align="center">Azure PostgreSQL Agent Memory</h1>
