@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="assets/azure-logo.svg" alt="Microsoft Azure" height="80" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/postgresql-logo.svg" alt="PostgreSQL" height="80" />
+</p>
+
 # claude-azure-pg-mem
 
 Multi-tenant persistent memory for coding agents (OpenCode, Claude Code, GitHub Copilot CLI) backed by **Azure PostgreSQL Flexible Server** with **pgvector**.
