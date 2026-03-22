@@ -1,0 +1,6 @@
+{
+  "name": "agent-mem",
+  "version": "0.1.0",
+  "description": "Azure Postgres persistent memory with multi-tenant isolation",
+  "entryPoint": "hooks/hooks.json"
+}

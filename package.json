@@ -1,0 +1,67 @@
+{
+  "name": "claude-azure-pg-mem",
+  "version": "0.1.0",
+  "description": "Azure Postgres persistent memory for coding agents (OpenCode, Claude Code, GitHub Copilot CLI) with multi-tenant Row Level Security",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "claude-azure-pg-mem": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "plugin"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "build:plugin": "node scripts/build-plugin.js",
+    "worker:start": "tsx src/services/worker-service.ts start",
+    "worker:dev": "tsx watch src/services/worker-service.ts start --foreground",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "claude",
+    "opencode",
+    "copilot",
+    "mcp",
+    "memory",
+    "postgres",
+    "pgvector",
+    "azure",
+    "ai-agent",
+    "multi-tenant",
+    "rls"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@huggingface/transformers": "^3.8.1",
+    "drizzle-orm": "^0.40.0",
+    "express": "^4.18.2",
+    "pg": "^8.13.0",
+    "pgvector": "^0.2.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.6",
+    "drizzle-kit": "^0.30.0",
+    "esbuild": "^0.27.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,0 +1,329 @@
+# claude-azure-pg-mem
+
+Multi-tenant persistent memory for coding agents (OpenCode, Claude Code, GitHub Copilot CLI) backed by **Azure PostgreSQL Flexible Server** with **pgvector**.
+
+Captures tool usage observations during sessions, generates semantic summaries, and makes them searchable across sessions and machines. Multiple users share the same Postgres instance, isolated by **Row Level Security (RLS)**.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Coding Agent (OpenCode / Claude Code / Copilot CLI)    │
+│                                                         │
+│  ┌──────────────┐    ┌──────────────┐                   │
+│  │  MCP Server  │───▶│    Worker    │                   │
+│  │  (stdio)     │    │  (HTTP :37778)│                  │
+│  │  3 tools     │    │  Express API │                   │
+│  └──────────────┘    └──────┬───────┘                   │
+│                             │ withUserContext()          │
+│                             │ SET LOCAL app.user_id      │
+│                      ┌──────▼───────┐                   │
+│                      │ Azure Postgres│                  │
+│                      │ + pgvector   │                   │
+│                      │ + RLS        │                   │
+│                      └──────────────┘                   │
+└─────────────────────────────────────────────────────────┘
+```
+
+**MCP Tools** (progressive disclosure):
+1. `search` — lightweight results (~50-100 tokens each)
+2. `timeline` — medium context (~200-500 tokens)
+3. `get_observations` — full details (~500-1000 tokens each)
+
+## Prerequisites
+
+- **Node.js 22+**
+- **Azure PostgreSQL Flexible Server** with `pgvector` and `vector` extensions enabled
+  - Azure Portal → your Postgres server → Server parameters → search `azure.extensions` → enable `VECTOR`
+  - Or via Azure CLI:
+    ```bash
+    az postgres flexible-server parameter set \
+      --resource-group <rg> --server-name <server> \
+      --name azure.extensions --value VECTOR
+    ```
+
+## Quick Start
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/your-org/claude-azure-postgres-memory.git
+cd claude-azure-postgres-memory
+npm install
+```
+
+### 2. Configure the database connection
+
+```bash
+# Option A: Environment variable
+export DATABASE_URL="postgres://user:password@your-server.postgres.database.azure.com:5432/agent_memory?sslmode=require"
+
+# Option B: Persistent setting (stored in ~/.agent-mem/settings.json)
+npx tsx src/index.ts config set DATABASE_URL "postgres://user:password@your-server.postgres.database.azure.com:5432/agent_memory?sslmode=require"
+```
+
+### 3. Push the schema
+
+Creates tables, pgvector extension, indexes, and RLS policies:
+
+```bash
+npx tsx src/index.ts db push
+```
+
+### 4. Verify the connection
+
+```bash
+npx tsx src/index.ts db status
+```
+
+### 5. Start the worker daemon
+
+```bash
+npx tsx src/index.ts start
+```
+
+### 6. Install as a Claude Code plugin (optional)
+
+```bash
+npx tsx src/index.ts install
+```
+
+This copies the `plugin/` directory to `~/.claude/plugins/agent-mem/`, registering:
+- **Hooks** for session lifecycle (auto-capture observations)
+- **MCP server** for memory search tools
+- **Skill** (`mem-search`) for agents to discover and use
+
+## Configuration
+
+All settings can be set via environment variables (prefixed with `AGENT_MEM_`) or through the CLI:
+
+| Setting | Env Var | Default | Description |
+|---------|---------|---------|-------------|
+| `DATABASE_URL` | `DATABASE_URL` | — | Azure Postgres connection string |
+| `WORKER_PORT` | `AGENT_MEM_WORKER_PORT` | `37778` | Worker HTTP port |
+| `LOG_LEVEL` | `AGENT_MEM_LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARN, ERROR) |
+| `USER_ID` | `AGENT_MEM_USER_ID` | auto | User ID for RLS (auto = SHA-256 of `user@hostname`) |
+
+### Embedding Providers
+
+By default, embeddings are generated locally using **Nomic Embed Text v1** (768 dimensions, no API key needed). You can switch to **Azure OpenAI** embeddings for potentially higher quality at the cost of an API call.
+
+| Setting | Env Var | Default | Description |
+|---------|---------|---------|-------------|
+| `EMBEDDING_PROVIDER` | `AGENT_MEM_EMBEDDING_PROVIDER` | `nomic` | `nomic`, `azure_openai`, or `noop` |
+| `EMBEDDING_DIMENSIONS` | `AGENT_MEM_EMBEDDING_DIMENSIONS` | `768` | Must match DB vector(N) column |
+| `AZURE_OPENAI_ENDPOINT` | `AGENT_MEM_AZURE_OPENAI_ENDPOINT` | — | e.g. `https://<resource>.openai.azure.com` |
+| `AZURE_OPENAI_API_KEY` | `AGENT_MEM_AZURE_OPENAI_API_KEY` | — | API key |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `AGENT_MEM_AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | — | Deployment name |
+| `AZURE_OPENAI_API_VERSION` | `AGENT_MEM_AZURE_OPENAI_API_VERSION` | `2024-06-01` | API version |
+
+**Switching to Azure OpenAI:**
+
+```bash
+npx tsx src/index.ts config set EMBEDDING_PROVIDER azure_openai
+npx tsx src/index.ts config set AZURE_OPENAI_ENDPOINT "https://your-resource.openai.azure.com"
+npx tsx src/index.ts config set AZURE_OPENAI_API_KEY "your-key"
+npx tsx src/index.ts config set AZURE_OPENAI_EMBEDDING_DEPLOYMENT "text-embedding-3-small"
+
+# Verify it works
+npx tsx src/index.ts db embedding-test
+```
+
+The Azure OpenAI API supports a `dimensions` parameter, so models like `text-embedding-3-small` (natively 1536-dim) will truncate their output to 768-dim to match the DB schema. No column migration needed.
+
+**Switching back to local Nomic:**
+
+```bash
+npx tsx src/index.ts config set EMBEDDING_PROVIDER nomic
+npx tsx src/index.ts db embedding-test
+```
+
+```bash
+# Set a value
+npx tsx src/index.ts config set WORKER_PORT 37779
+
+# Get a value
+npx tsx src/index.ts config get WORKER_PORT
+
+# List all settings
+npx tsx src/index.ts config list
+```
+
+Settings are stored in `~/.agent-mem/settings.json`.
+
+## CLI Reference
+
+```
+claude-azure-pg-mem config set <key> <value>   Set a config value
+claude-azure-pg-mem config get <key>            Get a config value
+claude-azure-pg-mem config list                 List all settings
+claude-azure-pg-mem db push                     Push schema to database
+claude-azure-pg-mem db status                   Check DB connection & table counts
+claude-azure-pg-mem db embedding-test           Test configured embedding provider
+claude-azure-pg-mem install                     Register as Claude Code plugin
+claude-azure-pg-mem uninstall                   Remove plugin registration
+claude-azure-pg-mem start                       Start worker daemon
+claude-azure-pg-mem stop                        Stop worker daemon
+claude-azure-pg-mem status                      Show worker status
+claude-azure-pg-mem hook <adapter> <handler>    Called by Claude Code hooks
+```
+
+## Building
+
+```bash
+# TypeScript compilation (ESM output to dist/)
+npm run build
+
+# Self-contained CJS bundles for plugin distribution
+npm run build:plugin
+# → dist/plugin/worker-service.cjs
+# → dist/plugin/mcp-server.cjs
+```
+
+## Multi-Tenant Security
+
+Every table has a `user_id` column. PostgreSQL Row Level Security policies enforce that each query only sees rows matching the current user:
+
+```sql
+-- Applied automatically by `db push`
+ALTER TABLE cpm_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY cpm_sessions_tenant ON cpm_sessions
+  USING (user_id = current_setting('app.user_id', true));
+```
+
+The worker sets `SET LOCAL app.user_id = '<hash>'` inside every transaction via `withUserContext()`. This is transaction-scoped, so it's safe with connection pooling.
+
+User IDs are auto-derived from `SHA-256(os.username@os.hostname)` or set explicitly via `AGENT_MEM_USER_ID`.
+
+## Database Schema
+
+Seven tables with `cpm_` prefix:
+
+| Table | Purpose |
+|-------|---------|
+| `cpm_sessions` | Session lifecycle (start/end, project, cost) |
+| `cpm_sdk_sessions` | SDK session correlation |
+| `cpm_observations` | Tool call observations (pgvector embeddings) |
+| `cpm_session_summaries` | AI-generated session summaries |
+| `cpm_pending_messages` | Queue for async processing |
+| `cpm_user_prompts` | User prompt history |
+| `cpm_schema_versions` | Schema migration tracking |
+
+All tables use HNSW indexes on vector columns (768 dims, Nomic Embed Text v1) and GIN indexes on tsvector columns for hybrid search.
+
+## For OpenCode / Agent Skill
+
+The `plugin/skills/mem-search/SKILL.md` teaches agents when and how to search memory using a 3-layer progressive disclosure workflow:
+
+1. **Search** — get an index of matching results with IDs
+2. **Timeline** — view session timelines for context
+3. **Get Observations** — fetch full details for specific IDs
+
+Agents are instructed to never fetch full details without filtering first (10x token savings).
+
+## Development
+
+```bash
+# Run in development mode (hot reload)
+npm run dev
+
+# Worker with hot reload
+npm run worker:dev
+
+# Type checking
+npm run lint
+```
+
+## Cost Breakdown
+
+### Scenario A: Solo Developer (Local Nomic Embeddings)
+
+| Component | Monthly Cost | Notes |
+|-----------|-------------|-------|
+| Azure PostgreSQL Flexible Server (B1ms) | ~$16 | Burstable, 1 vCore, 2 GiB RAM |
+| Storage (32 GiB Premium SSD) | included | Included in base price |
+| Backup (7 days, LRS) | included | LRS backup at no extra cost |
+| Embedding generation | $0.00 | Runs locally via `@huggingface/transformers` |
+| **Total** | **~$16/month** | |
+
+The B1ms is eligible for the [Azure free account](https://learn.microsoft.com/azure/postgresql/configure-maintain/how-to-deploy-on-azure-free-account) (750 hours/month + 32 GB storage free for 12 months).
+
+### Scenario B: 10 Engineers, Active Claude Code Usage
+
+This is the realistic team scenario — 10 developers each running multiple Claude Code sessions daily, all writing to the shared database.
+
+**Usage assumptions per engineer per day:**
+- ~8 Claude Code sessions
+- ~30 observations per session (tool calls, file reads, edits)
+- ~15 memory searches per day
+
+**Monthly totals (10 engineers, ~22 working days):**
+
+| Metric | Per Engineer/Day | 10 Engineers/Month |
+|--------|-----------------|-------------------|
+| Sessions | ~8 | ~1,760 |
+| Observations | ~240 | ~52,800 |
+| Session summaries | ~8 | ~1,760 |
+| Embedding calls (writes) | ~248 | ~54,560 |
+| Search queries | ~15 | ~3,300 |
+
+**Storage growth estimate:**
+
+Each observation row uses ~4-7 KB (768-dim vector = 3 KB + text + tsvector + indexes):
+
+| Timeframe | New Observations | Storage Growth | Cumulative |
+|-----------|-----------------|----------------|------------|
+| 1 month | ~53K | ~250-370 MB | ~370 MB |
+| 6 months | ~317K | ~1.5-2.2 GB | ~2.2 GB |
+| 12 months | ~634K | ~3-4.4 GB | ~4.4 GB |
+| 24 months | ~1.27M | ~6-8.9 GB | ~8.9 GB |
+
+With 32 GB storage, a 10-person team has **3-7 years** before hitting the storage limit — and storage can be scaled up online without downtime.
+
+**Connection capacity:**
+
+B1ms has 50 max connections (35 usable after PostgreSQL reserves 15). The worker daemon uses a connection pool:
+
+| Setup | Connections Used | B1ms (35 avail) | B2s (414 avail) |
+|-------|-----------------|-----------------|-----------------|
+| 1 worker, pool=5 | 5 | OK | OK |
+| 2 workers (HA), pool=5 each | 10 | OK | OK |
+| 10 workers (1 per engineer), pool=3 each | 30 | Tight | OK |
+
+For a shared worker (recommended architecture), B1ms is sufficient for 10 engineers. Each engineer's agent connects to the same worker over HTTP — the worker manages the DB pool. Only scale up if running per-engineer worker instances.
+
+**Monthly cost — 10 engineers:**
+
+| Component | B1ms | B2s (if needed) |
+|-----------|------|-----------------|
+| Compute | ~$16 | ~$32 |
+| Azure OpenAI embeddings (optional) | ~$0.50 | ~$0.50 |
+| **Total (local Nomic)** | **~$16** | **~$32** |
+| **Total (Azure OpenAI)** | **~$17** | **~$33** |
+| **Per engineer/month** | **~$1.60** | **~$3.20** |
+
+Embedding costs are negligible even at scale — text-embedding-3-small costs $0.02/1M tokens, and 55K observations/month is only ~27M tokens (~$0.54).
+
+### Scaling Reference
+
+| SKU | vCores | RAM | Max User Connections | Monthly Cost | Good For |
+|-----|--------|-----|---------------------|-------------|----------|
+| B1ms | 1 | 2 GiB | 35 | ~$16 | 1-10 engineers (shared worker) |
+| B2s | 2 | 4 GiB | 414 | ~$32 | 10-50 engineers |
+| B2ms | 2 | 8 GiB | 844 | ~$50 | 50-100 engineers |
+| D2ds_v5 (Gen Purpose) | 2 | 8 GiB | 844 | ~$125 | Production, sustained load |
+
+For reserved instances: 1-year commitment saves ~40%, 3-year saves ~60%.
+
+### Cost Optimization Tips
+
+1. **Use Azure Free Account** — B1ms + 32 GB storage is free for 12 months
+2. **Use local Nomic embeddings** (default) — eliminates embedding API costs entirely
+3. **Shared worker architecture** — one worker daemon per team, not per engineer
+4. **Stop the server when not in use** — Burstable instances can be stopped to pause compute charges
+5. **Reserved pricing** — commit for 1-3 years for significant savings on production deployments
+6. **Data retention** — implement observation pruning for old sessions to manage storage growth
+
+## License
+
+MIT
