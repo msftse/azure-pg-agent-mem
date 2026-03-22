@@ -112,12 +112,32 @@ By default, embeddings are generated locally using **Nomic Embed Text v1** (768 
 |---------|---------|---------|-------------|
 | `EMBEDDING_PROVIDER` | `AGENT_MEM_EMBEDDING_PROVIDER` | `nomic` | `nomic`, `azure_openai`, or `noop` |
 | `EMBEDDING_DIMENSIONS` | `AGENT_MEM_EMBEDDING_DIMENSIONS` | `768` | Must match DB vector(N) column |
-| `AZURE_OPENAI_ENDPOINT` | `AGENT_MEM_AZURE_OPENAI_ENDPOINT` | — | e.g. `https://<resource>.openai.azure.com` |
-| `AZURE_OPENAI_API_KEY` | `AGENT_MEM_AZURE_OPENAI_API_KEY` | — | API key |
+| `AZURE_OPENAI_ENDPOINT` | `AGENT_MEM_AZURE_OPENAI_ENDPOINT` | — | e.g. `https://<resource>.cognitiveservices.azure.com` |
+| `AZURE_OPENAI_API_KEY` | `AGENT_MEM_AZURE_OPENAI_API_KEY` | — | API key (optional — omit for Entra ID auth) |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `AGENT_MEM_AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | — | Deployment name |
 | `AZURE_OPENAI_API_VERSION` | `AGENT_MEM_AZURE_OPENAI_API_VERSION` | `2024-06-01` | API version |
 
-**Switching to Azure OpenAI:**
+**Authentication for Azure OpenAI:**
+
+Two auth modes are supported:
+
+- **Entra ID / AAD (recommended):** Omit `AZURE_OPENAI_API_KEY`. The system uses `DefaultAzureCredential` from `@azure/identity`, which auto-chains: Azure CLI login → managed identity → environment variables. Tokens are cached and refreshed automatically. Works with Azure OpenAI resources that have `disableLocalAuth = true`.
+
+- **API key:** Set `AZURE_OPENAI_API_KEY` to your key. Simpler but less secure.
+
+**Switching to Azure OpenAI (Entra ID auth):**
+
+```bash
+npx tsx src/index.ts config set EMBEDDING_PROVIDER azure_openai
+npx tsx src/index.ts config set AZURE_OPENAI_ENDPOINT "https://your-resource.cognitiveservices.azure.com"
+npx tsx src/index.ts config set AZURE_OPENAI_EMBEDDING_DEPLOYMENT "text-embedding-3-small"
+# No API key needed — uses 'az login' or managed identity
+
+# Verify it works
+npx tsx src/index.ts db embedding-test
+```
+
+**Switching to Azure OpenAI (API key auth):**
 
 ```bash
 npx tsx src/index.ts config set EMBEDDING_PROVIDER azure_openai

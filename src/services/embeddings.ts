@@ -10,9 +10,14 @@
  *   AGENT_MEM_EMBEDDING_PROVIDER            – 'nomic' (default) | 'azure_openai'
  *   AGENT_MEM_EMBEDDING_DIMENSIONS          – target vector size (default: 768)
  *   AGENT_MEM_AZURE_OPENAI_ENDPOINT         – e.g. https://<resource>.openai.azure.com
- *   AGENT_MEM_AZURE_OPENAI_API_KEY          – API key
+ *   AGENT_MEM_AZURE_OPENAI_API_KEY          – API key (optional — if omitted, uses Entra ID / AAD)
  *   AGENT_MEM_AZURE_OPENAI_EMBEDDING_DEPLOYMENT – deployment name
  *   AGENT_MEM_AZURE_OPENAI_API_VERSION      – API version (default: 2024-06-01)
+ *
+ * Authentication priority for Azure OpenAI:
+ *   1. If AZURE_OPENAI_API_KEY is set, uses API key auth (api-key header)
+ *   2. Otherwise, uses DefaultAzureCredential (Entra ID / AAD bearer token)
+ *      — works with Azure CLI login, managed identity, env vars, etc.
  *
  * The DB column is vector(768). When using Azure OpenAI with models that natively
  * produce 1536-dim (text-embedding-3-small) or 3072-dim (text-embedding-3-large),
@@ -94,6 +99,58 @@ export function createNomicEmbedder(): EmbedFn {
 // Azure OpenAI Embeddings
 // ---------------------------------------------------------------------------
 
+/** Scope required for Azure OpenAI / Cognitive Services tokens. */
+const AZURE_COGNITIVESERVICES_SCOPE = 'https://cognitiveservices.azure.com/.default';
+
+/**
+ * Helper: create a function that returns an auth header for Azure OpenAI.
+ *
+ * If an API key is provided, returns `{ 'api-key': key }` (static).
+ * Otherwise, uses DefaultAzureCredential to obtain a bearer token and
+ * caches it, refreshing 5 minutes before expiry.
+ */
+function createAuthHeaderProvider(
+  apiKey: string | undefined,
+): () => Promise<Record<string, string>> {
+  if (apiKey) {
+    const headers = { 'api-key': apiKey };
+    return async () => headers;
+  }
+
+  // AAD / Entra ID token auth via DefaultAzureCredential.
+  let cachedToken: { token: string; expiresOnTimestamp: number } | null = null;
+  const REFRESH_MARGIN_MS = 5 * 60 * 1000; // refresh 5 min before expiry
+
+  return async () => {
+    const now = Date.now();
+    if (cachedToken && cachedToken.expiresOnTimestamp - now > REFRESH_MARGIN_MS) {
+      return { Authorization: `Bearer ${cachedToken.token}` };
+    }
+
+    // Lazily import to avoid pulling in the SDK when using API key or Nomic.
+    const { DefaultAzureCredential } = await import('@azure/identity');
+    const credential = new DefaultAzureCredential();
+    const accessToken = await credential.getToken(AZURE_COGNITIVESERVICES_SCOPE);
+
+    if (!accessToken) {
+      throw new Error(
+        'Failed to obtain Entra ID token for Azure Cognitive Services. ' +
+          'Ensure you are logged in (az login) or have a valid managed identity.',
+      );
+    }
+
+    cachedToken = {
+      token: accessToken.token,
+      expiresOnTimestamp: accessToken.expiresOnTimestamp,
+    };
+    log.info('Azure AD token acquired for Cognitive Services', {
+      expiresIn: Math.round((accessToken.expiresOnTimestamp - now) / 1000) + 's',
+    });
+
+    return { Authorization: `Bearer ${cachedToken.token}` };
+  };
+}
+
 /**
  * Create an embedding function backed by Azure OpenAI Embeddings API.
  *
@@ -101,15 +158,20 @@ export function createNomicEmbedder(): EmbedFn {
  * parameter is sent in the request body so models like text-embedding-3-small
  * (natively 1536-dim) truncate their output to match the DB column width.
  *
+ * Authentication:
+ *   - If `apiKey` is provided, uses API key auth (api-key header).
+ *   - If `apiKey` is undefined/empty, uses DefaultAzureCredential (Entra ID)
+ *     for bearer token auth. Tokens are cached and refreshed automatically.
+ *
  * @param endpoint    - Azure OpenAI endpoint URL
- * @param apiKey      - API key
+ * @param apiKey      - API key (optional — omit for AAD auth)
  * @param deployment  - Deployment/model name
  * @param dimensions  - Desired output dimensionality (default: 768)
  * @param apiVersion  - API version string
  */
 export function createAzureOpenAIEmbedder(
   endpoint: string,
-  apiKey: string,
+  apiKey: string | undefined,
   deployment: string,
   dimensions: number = 768,
   apiVersion: string = '2024-06-01',
@@ -118,11 +180,15 @@ export function createAzureOpenAIEmbedder(
   const baseUrl = endpoint.replace(/\/+$/, '');
   const url = `${baseUrl}/openai/deployments/${encodeURIComponent(deployment)}/embeddings?api-version=${apiVersion}`;
 
+  const authMode = apiKey ? 'api-key' : 'entra-id';
+  const getAuthHeaders = createAuthHeaderProvider(apiKey);
+
   log.info('Azure OpenAI embedder configured', {
     endpoint: baseUrl,
     deployment,
     dimensions,
     apiVersion,
+    authMode,
   });
 
   return async (text: string): Promise<number[]> => {
@@ -131,11 +197,13 @@ export function createAzureOpenAIEmbedder(
       dimensions,
     });
 
+    const authHeaders = await getAuthHeaders();
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'api-key': apiKey,
+        ...authHeaders,
       },
       body,
     });
@@ -202,19 +270,19 @@ export function createEmbedder(): { embed: EmbedFn; info: EmbedderInfo } {
 
   if (provider === 'azure_openai') {
     const endpoint = getSetting('AZURE_OPENAI_ENDPOINT');
-    const apiKey = getSetting('AZURE_OPENAI_API_KEY');
+    const apiKey = getSetting('AZURE_OPENAI_API_KEY') || undefined; // undefined = use AAD
     const deployment = getSetting('AZURE_OPENAI_EMBEDDING_DEPLOYMENT');
     const apiVersion = getSetting('AZURE_OPENAI_API_VERSION') || '2024-06-01';
 
-    if (!endpoint || !apiKey || !deployment) {
+    if (!endpoint || !deployment) {
       const missing: string[] = [];
       if (!endpoint) missing.push('AZURE_OPENAI_ENDPOINT');
-      if (!apiKey) missing.push('AZURE_OPENAI_API_KEY');
       if (!deployment) missing.push('AZURE_OPENAI_EMBEDDING_DEPLOYMENT');
 
       log.error(
         `Azure OpenAI embedder selected but missing required settings: ${missing.join(', ')}. ` +
-          'Falling back to no-op embedder.',
+          'Falling back to no-op embedder. ' +
+          '(AZURE_OPENAI_API_KEY is optional — omit it for Entra ID / AAD auth.)',
       );
       return {
         embed: noopEmbedder(dimensions),
