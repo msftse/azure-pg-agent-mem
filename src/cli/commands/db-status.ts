@@ -56,14 +56,22 @@ export async function dbStatus(): Promise<void> {
       console.log('pgvector: NOT enabled (run "db push" first)');
     }
 
-    // Table counts
-    console.log('\nTable row counts:');
+    // Table counts — use pg_stat_user_tables for estimated row counts.
+    // Direct COUNT(*) returns 0 because NOBYPASSRLS is set on the admin role
+    // and no app.user_id context is set in this diagnostic connection.
+    console.log('\nTable row counts (estimated):');
     for (const table of TABLES) {
       try {
-        // Use superuser/admin query (no RLS context set)
-        const result = await client.query(`SELECT count(*) as cnt FROM ${table}`);
-        const count = (result.rows[0] as { cnt: string }).cnt;
-        console.log(`  ${table}: ${count}`);
+        const result = await client.query(
+          `SELECT n_live_tup AS cnt FROM pg_stat_user_tables WHERE relname = $1`,
+          [table],
+        );
+        if (result.rows.length > 0) {
+          const count = (result.rows[0] as { cnt: string }).cnt;
+          console.log(`  ${table}: ~${count}`);
+        } else {
+          console.log(`  ${table}: (not found — run "db push")`);
+        }
       } catch {
         console.log(`  ${table}: (not found — run "db push")`);
       }
