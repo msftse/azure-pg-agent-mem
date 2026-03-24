@@ -67,7 +67,7 @@ const shared = {
   target: 'node22',
   format: 'cjs',
   external: externalPackages,
-  outdir: path.join(root, 'dist', 'plugin'),
+  outdir: path.join(root, 'plugin', 'scripts'),
   minify: !isDev,
   sourcemap: isDev ? 'inline' : false,
   logLevel: 'warning',
@@ -86,11 +86,11 @@ async function main() {
   const entries = [
     {
       entryPoints: [path.join(root, 'src', 'services', 'worker-service.ts')],
-      outfile: path.join(root, 'dist', 'plugin', 'worker-service.cjs'),
+      outfile: path.join(root, 'plugin', 'scripts', 'worker-service.cjs'),
     },
     {
       entryPoints: [path.join(root, 'src', 'servers', 'mcp-server.ts')],
-      outfile: path.join(root, 'dist', 'plugin', 'mcp-server.cjs'),
+      outfile: path.join(root, 'plugin', 'scripts', 'mcp-server.cjs'),
     },
   ];
 
@@ -122,7 +122,7 @@ async function main() {
     warnings.forEach((w) => console.warn(w));
   }
 
-  console.log('Plugin bundles written to dist/plugin/');
+  console.log('Plugin bundles written to plugin/scripts/');
   console.log('  - worker-service.cjs');
   console.log('  - mcp-server.cjs');
 }

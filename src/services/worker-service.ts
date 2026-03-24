@@ -52,11 +52,15 @@ function createPool(): Pool {
     );
   }
 
+  const needsSsl =
+    databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com');
+
   return new Pool({
     connectionString: databaseUrl,
     max: 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
+    ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
   });
 }
 
@@ -155,6 +159,14 @@ function extractUserId(req: Request): string | null {
 }
 
 /**
+ * Strip content wrapped in `<private>...</private>` tags before storage.
+ * Supports multiline content and multiple occurrences.
+ */
+function stripPrivateTags(text: string): string {
+  return text.replace(/<private>[\s\S]*?<\/private>/gi, '').trim();
+}
+
+/**
  * Respond with a standardised JSON error.
  */
 function sendError(res: Response, status: number, message: string): void {
@@ -196,6 +208,12 @@ export class WorkerService {
     const { embed, info: embedderInfo } = createEmbedder();
     log.info('Embedding provider initialised', { ...embedderInfo });
 
+    // Nomic models require 'search_document:' / 'search_query:' prefixes
+    // for best results. Other providers (Azure OpenAI) don't use them.
+    const isNomic = embedderInfo.provider === 'nomic';
+    const docPrefix = isNomic ? 'search_document: ' : '';
+    const queryPrefix = isNomic ? 'search_query: ' : '';
+
     // ── Express app ──────────────────────────────────────────────────
     const app = express();
     app.use(express.json({ limit: '2mb' }));
@@ -223,6 +241,7 @@ export class WorkerService {
           query,
           project,
           type,
+          obs_type,
           limit = '20',
           offset = '0',
           dateStart,
@@ -247,6 +266,11 @@ export class WorkerService {
             conditions.push(`type = $${paramIdx++}`);
             values.push(type);
           }
+          if (obs_type && !type) {
+            // obs_type is an alias for type used by the MCP tool.
+            conditions.push(`type = $${paramIdx++}`);
+            values.push(obs_type);
+          }
           if (dateStart) {
             conditions.push(`created_at >= $${paramIdx++}`);
             values.push(dateStart);
@@ -261,7 +285,7 @@ export class WorkerService {
           let orderClause = 'ORDER BY created_at DESC';
 
           if (query) {
-            const queryEmbedding = await embed(`search_query: ${query}`);
+            const queryEmbedding = await embed(`${queryPrefix}${query}`);
             const embeddingLiteral = `'[${queryEmbedding.join(',')}]'::vector`;
 
             // Hybrid: combine cosine similarity score with tsvector rank.
@@ -597,14 +621,16 @@ export class WorkerService {
       let observationType = type || 'tool_use';
 
       if (rawText) {
-        observationText = rawText;
+        observationText = stripPrivateTags(rawText);
       } else if (tool_name && tool_response) {
         // Construct text from tool call data.
         const inputStr = tool_input ? JSON.stringify(tool_input, null, 2) : '';
         const respPreview = tool_response.length > 2000
           ? tool_response.slice(0, 2000) + '…'
           : tool_response;
-        observationText = `Tool: ${tool_name}\nInput: ${inputStr}\nOutput: ${respPreview}`;
+        observationText = stripPrivateTags(
+          `Tool: ${tool_name}\nInput: ${inputStr}\nOutput: ${respPreview}`,
+        );
         observationTitle = observationTitle || `${tool_name} call`;
         observationType = 'tool_use';
       } else {
@@ -616,7 +642,7 @@ export class WorkerService {
       try {
         // Generate the embedding for the observation text.
         const textToEmbed = [observationTitle, observationText].filter(Boolean).join(' – ');
-        const embedding = await embed(`search_document: ${textToEmbed}`);
+        const embedding = await embed(`${docPrefix}${textToEmbed}`);
 
         const now = new Date();
         const nowISO = now.toISOString();
@@ -635,6 +661,17 @@ export class WorkerService {
         };
 
         const result = await withUserContext(pool, userId, async (client) => {
+          // Deduplication: check if an observation with the same content_hash
+          // already exists for this user to avoid storing duplicates.
+          const existing = await client.query(
+            'SELECT id, type, project, title, created_at FROM cpm_observations WHERE content_hash = $1 AND user_id = $2 LIMIT 1',
+            [contentHash, userId],
+          );
+          if (existing.rows.length > 0) {
+            log.debug('Duplicate observation skipped', { contentHash, existingId: existing.rows[0].id });
+            return existing;
+          }
+
           const sql = `
             INSERT INTO cpm_observations
               (memory_session_id, project, user_id, text, type, title, subtitle,
@@ -725,7 +762,7 @@ export class WorkerService {
         const embeddingText = embeddingParts.length > 0
           ? embeddingParts.join(' ')
           : 'session summary';
-        const embedding = await embed(`search_document: ${embeddingText}`);
+        const embedding = await embed(`${docPrefix}${embeddingText}`);
 
         const now = new Date();
         const nowISO = now.toISOString();

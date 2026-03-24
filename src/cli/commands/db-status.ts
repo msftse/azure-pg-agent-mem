@@ -31,7 +31,9 @@ export async function dbStatus(): Promise<void> {
 
   const pool = new Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes('azure') ? { rejectUnauthorized: false } : undefined,
+    ssl: (databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com'))
+      ? { rejectUnauthorized: false }
+      : undefined,
     max: 1,
   });
 

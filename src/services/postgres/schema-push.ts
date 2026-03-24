@@ -80,7 +80,7 @@ async function execSafe(
  * @param databaseUrl - Full postgres:// connection string (with sslmode).
  */
 export async function pushSchema(databaseUrl: string): Promise<void> {
-  const needsSsl = databaseUrl.includes('sslmode=require');
+  const needsSsl = databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com');
   const pool = new Pool({
     connectionString: databaseUrl,
     max: 3,
