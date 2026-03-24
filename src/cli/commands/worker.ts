@@ -28,7 +28,16 @@ interface PidInfo {
 function readPidFile(): PidInfo | null {
   try {
     if (!existsSync(PID_FILE)) return null;
-    return JSON.parse(readFileSync(PID_FILE, 'utf-8')) as PidInfo;
+    const raw = readFileSync(PID_FILE, 'utf-8').trim();
+
+    // The worker daemon writes a plain PID number (String(process.pid)).
+    // Try parsing as a plain number first, then fall back to JSON.
+    const plainPid = parseInt(raw, 10);
+    if (!Number.isNaN(plainPid) && String(plainPid) === raw) {
+      return { pid: plainPid, port: getWorkerPort(), startedAt: '' };
+    }
+
+    return JSON.parse(raw) as PidInfo;
   } catch {
     return null;
   }
