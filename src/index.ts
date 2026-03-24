@@ -26,6 +26,7 @@ Usage:
   claude-azure-pg-mem db push                     Push schema to database
   claude-azure-pg-mem db status                   Check DB connection & table counts
   claude-azure-pg-mem db embedding-test           Test configured embedding provider
+  claude-azure-pg-mem setup                       One-command setup (config + schema + worker + plugin)
   claude-azure-pg-mem install                     Register as Claude Code plugin
   claude-azure-pg-mem uninstall                   Remove plugin registration
   claude-azure-pg-mem start                       Start worker daemon
@@ -125,6 +126,14 @@ async function main(): Promise<void> {
       console.error(`Unknown db subcommand: ${sub}`);
       console.error('Valid subcommands: provision, push, status, embedding-test');
       process.exitCode = 1;
+      return;
+    }
+
+    // ---- setup (one-command) ---------------------------------------------
+    case 'setup': {
+      const { setup, parseSetupFlags } = await import('./cli/commands/setup.js');
+      const setupFlags = parseSetupFlags(args.slice(1));
+      await setup(setupFlags);
       return;
     }
 
