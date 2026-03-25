@@ -217,10 +217,98 @@ Settings are stored in `~/.agent-mem/settings.json`.
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
 | `DATABASE_URL` | `DATABASE_URL` | — | Azure PostgreSQL connection string |
+| `AUTH_METHOD` | `AGENT_MEM_AUTH_METHOD` | `auto` | PostgreSQL auth: `auto`, `entra_id`, or `password` |
 | `WORKER_PORT` | `AGENT_MEM_WORKER_PORT` | `37778` | Worker HTTP port |
 | `WORKER_HOST` | `AGENT_MEM_WORKER_HOST` | `127.0.0.1` | Worker bind address |
 | `LOG_LEVEL` | `AGENT_MEM_LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARN, ERROR) |
 | `USER_ID` | `AGENT_MEM_USER_ID` | auto | User ID for RLS (auto = SHA-256 of `user@hostname`) |
+
+### PostgreSQL Authentication
+
+The system supports two authentication methods for connecting to Azure PostgreSQL:
+
+| Method | How It Works | When To Use |
+|--------|-------------|-------------|
+| **Password** (default) | Username and password in the `DATABASE_URL` | Simple setups, local development |
+| **Entra ID** (recommended) | Azure AD token via `az login` — no password stored | Production, teams, security-conscious setups |
+
+#### Auto-Detection (`AUTH_METHOD=auto`)
+
+By default, the system auto-detects which method to use based on the `DATABASE_URL`:
+
+- If the URL contains a password (`postgres://user:password@host/db`) → **password auth**
+- If the URL has no password (`postgres://user@host/db`) → **Entra ID auth**
+
+#### Setting Up Entra ID Authentication
+
+**Prerequisites:**
+1. Azure CLI installed and logged in (`az login`)
+2. Azure PostgreSQL Flexible Server with "Microsoft Entra authentication" enabled
+3. An Entra ID admin configured on the server
+
+**Step 1: Enable Entra ID auth on the server** (if not already done):
+
+```bash
+az postgres flexible-server update \
+  --resource-group <rg> --name <server> \
+  --microsoft-entra-auth Enabled --password-auth Enabled
+```
+
+**Step 2: Set an Entra ID admin** (if not already done):
+
+```bash
+az postgres flexible-server microsoft-entra-admin create \
+  --resource-group <rg> --server-name <server> \
+  --display-name "<your-display-name>" \
+  --object-id "<your-entra-object-id>" \
+  --type User
+```
+
+**Step 3: Configure agent-mem:**
+
+```bash
+# Set the DATABASE_URL without a password (username = Entra display name, URL-encoded)
+npx tsx src/index.ts config set DATABASE_URL \
+  "postgres://MOD%20Administrator@your-server.postgres.database.azure.com:5432/agent_memory?sslmode=require"
+
+# Explicitly set Entra ID auth (optional — auto-detection works if no password in URL)
+npx tsx src/index.ts config set AUTH_METHOD entra_id
+```
+
+**Step 4: Restart the worker:**
+
+```bash
+npx tsx src/index.ts stop && npx tsx src/index.ts start
+```
+
+#### How Entra ID Auth Works Internally
+
+1. The Worker uses `DefaultAzureCredential` from `@azure/identity` to obtain an OAuth2 access token with scope `https://ossrdbms-aad.database.windows.net/.default`
+2. The token is passed as the PostgreSQL password — Azure PG Flexible Server validates it against Entra ID
+3. Tokens are cached in memory and automatically refreshed 5 minutes before expiry
+4. The `pg` Pool's `password` field is set to an async function `() => Promise<string>`, so each new connection gets a fresh token if needed
+5. The same `DefaultAzureCredential` is also used for Azure OpenAI embeddings (different scope: `https://cognitiveservices.azure.com/.default`)
+
+**Credential chain** (tried in order): Environment variables → Azure CLI (`az login`) → Managed Identity → Visual Studio Code → Azure PowerShell.
+
+#### Adding New Entra ID Users
+
+To grant another Entra ID user access to the database, connect as the Entra admin and run:
+
+```sql
+-- Connect to the 'postgres' database (not agent_memory) to use pgaadauth functions
+SELECT * FROM pgaadauth_create_principal('<display-name>', false, false);
+```
+
+Then grant permissions on `agent_memory`:
+
+```sql
+-- Connect to agent_memory
+GRANT CONNECT ON DATABASE agent_memory TO "<display-name>";
+GRANT USAGE ON SCHEMA public TO "<display-name>";
+GRANT ALL ON ALL TABLES IN SCHEMA public TO "<display-name>";
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO "<display-name>";
+```
 
 ### Embedding Providers
 
@@ -520,6 +608,7 @@ src/
 │   ├── worker-service.ts     # Express daemon — all business logic
 │   ├── embeddings.ts         # Nomic / Azure OpenAI / noop providers
 │   └── postgres/
+│       ├── auth.ts           # Azure Entra ID token provider for PostgreSQL
 │       ├── schema.ts         # Drizzle ORM table definitions
 │       ├── schema-push.ts    # DDL + indexes + RLS setup
 │       └── client.ts         # Shared DB client utilities

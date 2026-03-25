@@ -7,6 +7,7 @@
 import { Pool } from 'pg';
 import { getSetting } from '../../shared/settings.js';
 import { logger } from '../../shared/logger.js';
+import { shouldUseEntraAuth, createEntraPoolConfig } from '../../services/postgres/auth.js';
 
 const log = logger.child('DB:Status');
 
@@ -29,13 +30,22 @@ export async function dbStatus(): Promise<void> {
     return;
   }
 
-  const pool = new Pool({
-    connectionString: databaseUrl,
-    ssl: (databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com'))
-      ? { rejectUnauthorized: false }
-      : undefined,
-    max: 1,
-  });
+  const authMethod = getSetting('AUTH_METHOD');
+  const useEntra = shouldUseEntraAuth(authMethod, databaseUrl);
+
+  let pool: Pool;
+  if (useEntra) {
+    const entraConfig = createEntraPoolConfig(databaseUrl);
+    pool = new Pool({ ...entraConfig, max: 1 });
+  } else {
+    pool = new Pool({
+      connectionString: databaseUrl,
+      ssl: (databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com'))
+        ? { rejectUnauthorized: false }
+        : undefined,
+      max: 1,
+    });
+  }
 
   try {
     // Test connection

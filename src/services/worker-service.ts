@@ -25,6 +25,7 @@ import os from 'node:os';
 import { getSetting, DATA_DIR } from '../shared/settings.js';
 import { logger } from '../shared/logger.js';
 import { createEmbedder, type EmbedFn, type EmbedderInfo } from './embeddings.js';
+import { shouldUseEntraAuth, createEntraPoolConfig } from './postgres/auth.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -52,6 +53,21 @@ function createPool(): Pool {
     );
   }
 
+  const authMethod = getSetting('AUTH_METHOD');
+  const useEntra = shouldUseEntraAuth(authMethod, databaseUrl);
+
+  if (useEntra) {
+    log.info('Using Azure Entra ID authentication for PostgreSQL');
+    const entraConfig = createEntraPoolConfig(databaseUrl);
+    return new Pool({
+      ...entraConfig,
+      max: 10,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000, // slightly longer for token acquisition
+    });
+  }
+
+  log.info('Using password authentication for PostgreSQL');
   const needsSsl =
     databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com');
 
@@ -746,19 +762,20 @@ export class WorkerService {
 
       if (rawText) {
         observationText = stripPrivateTags(rawText);
-      } else if (tool_name && tool_response) {
+      } else if (tool_name) {
         // Construct text from tool call data.
         const inputStr = tool_input ? JSON.stringify(tool_input, null, 2) : '';
-        const respPreview = tool_response.length > 2000
-          ? tool_response.slice(0, 2000) + '…'
-          : tool_response;
+        const safeResponse = tool_response || '';
+        const respPreview = safeResponse.length > 2000
+          ? safeResponse.slice(0, 2000) + '…'
+          : safeResponse;
         observationText = stripPrivateTags(
           `Tool: ${tool_name}\nInput: ${inputStr}\nOutput: ${respPreview}`,
         );
         observationTitle = observationTitle || `${tool_name} call`;
         observationType = 'tool_use';
       } else {
-        return sendError(res, 400, 'Either text or tool_name+tool_response is required');
+        return sendError(res, 400, 'Either text or tool_name is required');
       }
 
       if (!project) return sendError(res, 400, 'project is required');

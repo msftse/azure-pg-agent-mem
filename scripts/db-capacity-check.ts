@@ -1,15 +1,25 @@
 import { Pool } from 'pg';
 import { getSetting } from '../src/shared/settings.js';
+import { shouldUseEntraAuth, createEntraPoolConfig } from '../src/services/postgres/auth.js';
 
 async function main() {
   const databaseUrl = getSetting('DATABASE_URL');
-  const needsSsl =
-    databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com');
-  const pool = new Pool({
-    connectionString: databaseUrl,
-    ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
-    max: 1,
-  });
+  const authMethod = getSetting('AUTH_METHOD');
+  const useEntra = shouldUseEntraAuth(authMethod, databaseUrl);
+
+  let pool: Pool;
+  if (useEntra) {
+    const entraConfig = createEntraPoolConfig(databaseUrl);
+    pool = new Pool({ ...entraConfig, max: 1 });
+  } else {
+    const needsSsl =
+      databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com');
+    pool = new Pool({
+      connectionString: databaseUrl,
+      ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+      max: 1,
+    });
+  }
 
   const client = await pool.connect();
 

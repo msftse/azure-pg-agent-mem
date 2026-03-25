@@ -12,6 +12,7 @@
 import { Pool } from 'pg';
 import { createEmbedder } from '../../services/embeddings.js';
 import { getSetting } from '../../shared/settings.js';
+import { shouldUseEntraAuth, createEntraPoolConfig } from '../../services/postgres/auth.js';
 
 const TEST_TEXT = 'The quick brown fox jumps over the lazy dog.';
 
@@ -122,11 +123,21 @@ export async function embeddingTest(): Promise<void> {
   }
 
   console.log('\nTesting database round-trip (pgvector cast)...');
-  const pool = new Pool({
-    connectionString: databaseUrl,
-    ssl: databaseUrl.includes('azure') ? { rejectUnauthorized: false } : undefined,
-    max: 1,
-  });
+
+  const authMethod = getSetting('AUTH_METHOD');
+  const useEntra = shouldUseEntraAuth(authMethod, databaseUrl);
+
+  let pool: Pool;
+  if (useEntra) {
+    const entraConfig = createEntraPoolConfig(databaseUrl);
+    pool = new Pool({ ...entraConfig, max: 1 });
+  } else {
+    pool = new Pool({
+      connectionString: databaseUrl,
+      ssl: databaseUrl.includes('azure') ? { rejectUnauthorized: false } : undefined,
+      max: 1,
+    });
+  }
 
   try {
     const client = await pool.connect();

@@ -21,6 +21,7 @@ import os from 'node:os';
 import * as schema from './schema.js';
 import { getSetting } from '../../shared/settings.js';
 import { logger } from '../../shared/logger.js';
+import { shouldUseEntraAuth, createEntraPoolConfig } from './auth.js';
 
 // ---------------------------------------------------------------------------
 // Public type alias
@@ -101,26 +102,38 @@ export function resolveUserId(): string {
 export function getPool(): Pool {
   if (!_pool) {
     const connectionString = resolveDatabaseUrl();
+    const authMethod = getSetting('AUTH_METHOD');
+    const useEntra = shouldUseEntraAuth(authMethod, connectionString);
 
-    // Azure Postgres requires SSL.  If the URL includes `sslmode=require` we
-    // enable it at the driver level.  `rejectUnauthorized: false` is
-    // acceptable here because Azure uses well-known CA certs and the
-    // connection string already pins the hostname.
-    const needsSsl = connectionString.includes('sslmode=require');
+    if (useEntra) {
+      log.info('Using Azure Entra ID authentication for PostgreSQL');
+      const entraConfig = createEntraPoolConfig(connectionString);
+      _pool = new Pool({
+        ...entraConfig,
+        max: 10,
+      });
+    } else {
+      // Azure Postgres requires SSL.  If the URL includes `sslmode=require` we
+      // enable it at the driver level.  `rejectUnauthorized: false` is
+      // acceptable here because Azure uses well-known CA certs and the
+      // connection string already pins the hostname.
+      const needsSsl = connectionString.includes('sslmode=require') ||
+        connectionString.includes('.postgres.database.azure.com');
 
-    _pool = new Pool({
-      connectionString,
-      max: 10,
-      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-    });
+      _pool = new Pool({
+        connectionString,
+        max: 10,
+        ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+      });
+
+      log.info('Connection pool created', { max: 10, ssl: needsSsl });
+    }
 
     _pool.on('error', (err) => {
       log.error('Unexpected pool error', {
         error: err.message,
       });
     });
-
-    log.info('Connection pool created', { max: 10, ssl: needsSsl });
   }
 
   return _pool;

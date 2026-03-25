@@ -37,6 +37,14 @@ const SETTING_DEFS: Record<
     default: '',
     env: ['DATABASE_URL', 'AGENT_MEM_DATABASE_URL'],
   },
+  // PostgreSQL authentication method: 'password' (default, uses DATABASE_URL
+  // credentials), 'entra_id' (Azure AD / Entra ID token auth via az login),
+  // or 'auto' (detects from DATABASE_URL — if password present, uses password;
+  // otherwise uses Entra ID).
+  AUTH_METHOD: {
+    default: 'auto',
+    env: 'AGENT_MEM_AUTH_METHOD',
+  },
   USER_ID: { default: '', env: 'AGENT_MEM_USER_ID' },
   WORKER_PORT: { default: '37778', env: 'AGENT_MEM_WORKER_PORT' },
   WORKER_HOST: { default: '127.0.0.1', env: 'AGENT_MEM_WORKER_HOST' },

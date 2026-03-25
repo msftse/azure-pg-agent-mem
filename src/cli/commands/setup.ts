@@ -61,6 +61,7 @@ async function waitForHealth(port: number, timeoutMs = 30_000): Promise<boolean>
 
 interface SetupFlags {
   databaseUrl?: string;
+  authMethod?: string;
   embeddingProvider?: string;
   azureOpenaiEndpoint?: string;
   azureOpenaiKey?: string;
@@ -74,6 +75,7 @@ export function parseSetupFlags(argv: string[]): SetupFlags {
     const arg = argv[i];
     const next = argv[i + 1];
     if (arg === '--database-url' && next) { flags.databaseUrl = next; i++; }
+    else if (arg === '--auth-method' && next) { flags.authMethod = next; i++; }
     else if (arg === '--embedding-provider' && next) { flags.embeddingProvider = next; i++; }
     else if (arg === '--azure-openai-endpoint' && next) { flags.azureOpenaiEndpoint = next; i++; }
     else if (arg === '--azure-openai-key' && next) { flags.azureOpenaiKey = next; i++; }
@@ -99,14 +101,17 @@ export async function setup(flags: SetupFlags = {}): Promise<void> {
     // ------------------------------------------------------------------
     // Step 1: DATABASE_URL
     // ------------------------------------------------------------------
-    console.log('--- Step 1/5: Database ---');
+    console.log('--- Step 1/6: Database ---');
 
     let dbUrl = flags.databaseUrl || getSetting('DATABASE_URL');
     if (!dbUrl) {
       console.log('');
       console.log('You need an Azure PostgreSQL Flexible Server with pgvector enabled.');
-      console.log('The connection string looks like:');
-      console.log('  postgres://user:password@server.postgres.database.azure.com:5432/dbname?sslmode=require');
+      console.log('');
+      console.log('Connection string formats:');
+      console.log('  Password auth:  postgres://user:password@server.postgres.database.azure.com:5432/dbname?sslmode=require');
+      console.log('  Entra ID auth:  postgres://user@server.postgres.database.azure.com:5432/dbname?sslmode=require');
+      console.log('                  (no password — token is acquired automatically via az login)');
       console.log('');
       dbUrl = await ask('DATABASE_URL: ');
     } else {
@@ -123,9 +128,42 @@ export async function setup(flags: SetupFlags = {}): Promise<void> {
     console.log('');
 
     // ------------------------------------------------------------------
+    // Step 2: Authentication method
+    // ------------------------------------------------------------------
+    console.log('--- Step 2/6: Authentication ---');
+
+    let authMethod = flags.authMethod || getSetting('AUTH_METHOD');
+    if (!authMethod || authMethod === 'auto') {
+      console.log('');
+      console.log('Choose how to authenticate with PostgreSQL:');
+      console.log('  1. auto       – Auto-detect from DATABASE_URL (recommended)');
+      console.log('  2. entra_id   – Azure Entra ID (use az login, no password needed)');
+      console.log('  3. password   – Traditional password in DATABASE_URL');
+      console.log('');
+      const choice = await ask('Auth method [1/2/3, default=1]: ');
+      if (choice === '2') authMethod = 'entra_id';
+      else if (choice === '3') authMethod = 'password';
+      else authMethod = 'auto';
+    }
+    setSetting('AUTH_METHOD', authMethod);
+    console.log(`  Auth method: ${authMethod}`);
+
+    if (authMethod === 'entra_id') {
+      console.log('');
+      console.log('  Entra ID auth requires:');
+      console.log('  1. Azure PostgreSQL server has "Microsoft Entra authentication" enabled');
+      console.log('  2. Your identity is added as a database user (pgaadauth_create_principal)');
+      console.log('  3. You are logged in via `az login`');
+      console.log('');
+      console.log('  The DATABASE_URL username should be your Entra ID display name or email.');
+      console.log('  No password is needed — a token is acquired automatically.');
+    }
+    console.log('');
+
+    // ------------------------------------------------------------------
     // Step 2: Embedding provider
     // ------------------------------------------------------------------
-    console.log('--- Step 2/5: Embeddings ---');
+    console.log('--- Step 3/6: Embeddings ---');
 
     let provider = flags.embeddingProvider || getSetting('EMBEDDING_PROVIDER');
     if (!provider || (provider !== 'azure_openai' && provider !== 'nomic')) {
@@ -172,7 +210,7 @@ export async function setup(flags: SetupFlags = {}): Promise<void> {
     // ------------------------------------------------------------------
     // Step 3: Push schema
     // ------------------------------------------------------------------
-    console.log('--- Step 3/5: Database schema ---');
+    console.log('--- Step 4/6: Database schema ---');
     console.log('  Pushing tables, indexes, pgvector, and RLS policies...');
 
     const { pushSchema } = await import('../../services/postgres/schema-push.js');
@@ -183,7 +221,7 @@ export async function setup(flags: SetupFlags = {}): Promise<void> {
     // ------------------------------------------------------------------
     // Step 4: Start worker
     // ------------------------------------------------------------------
-    console.log('--- Step 4/5: Worker daemon ---');
+    console.log('--- Step 5/6: Worker daemon ---');
 
     const port = parseInt(getSetting('WORKER_PORT') || '37778', 10);
 
@@ -216,7 +254,7 @@ export async function setup(flags: SetupFlags = {}): Promise<void> {
     // ------------------------------------------------------------------
     // Step 5: Install plugin
     // ------------------------------------------------------------------
-    console.log('--- Step 5/5: Plugin install ---');
+    console.log('--- Step 6/6: Plugin install ---');
 
     const { install } = await import('./install.js');
     await install();

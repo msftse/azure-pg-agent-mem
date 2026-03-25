@@ -78,7 +78,9 @@ async function callWorkerAPI(
     }
   }
 
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(30_000),
+  });
   const body = await res.text();
 
   if (!res.ok) {
@@ -109,6 +111,7 @@ async function callWorkerAPIPost(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(enrichedBody),
+    signal: AbortSignal.timeout(30_000),
   });
 
   const text = await res.text();
@@ -127,7 +130,9 @@ async function callWorkerAPIPost(
  */
 async function verifyWorkerConnection(): Promise<void> {
   try {
-    const res = await fetch(`${WORKER_BASE}/api/health`);
+    const res = await fetch(`${WORKER_BASE}/api/health`, {
+      signal: AbortSignal.timeout(10_000),
+    });
     if (!res.ok) {
       throw new Error(`Worker health check failed with status ${res.status}`);
     }

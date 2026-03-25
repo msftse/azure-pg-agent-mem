@@ -22,6 +22,8 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { sql } from 'drizzle-orm';
 import * as schema from './schema.js';
 import { logger } from '../../shared/logger.js';
+import { shouldUseEntraAuth, createEntraPoolConfig } from './auth.js';
+import { getSetting } from '../../shared/settings.js';
 
 const log = logger.child('SchemaPush');
 
@@ -80,12 +82,27 @@ async function execSafe(
  * @param databaseUrl - Full postgres:// connection string (with sslmode).
  */
 export async function pushSchema(databaseUrl: string): Promise<void> {
-  const needsSsl = databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com');
-  const pool = new Pool({
-    connectionString: databaseUrl,
-    max: 3,
-    ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-  });
+  const authMethod = getSetting('AUTH_METHOD');
+  const useEntra = shouldUseEntraAuth(authMethod, databaseUrl);
+
+  let pool: Pool;
+
+  if (useEntra) {
+    log.info('Using Azure Entra ID authentication for schema push');
+    const entraConfig = createEntraPoolConfig(databaseUrl);
+    pool = new Pool({
+      ...entraConfig,
+      max: 3,
+    });
+  } else {
+    log.info('Using password authentication for schema push');
+    const needsSsl = databaseUrl.includes('sslmode=require') || databaseUrl.includes('.postgres.database.azure.com');
+    pool = new Pool({
+      connectionString: databaseUrl,
+      max: 3,
+      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+    });
+  }
 
   try {
     log.info('Starting schema push …');
