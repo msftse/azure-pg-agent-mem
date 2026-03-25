@@ -283,10 +283,270 @@ Seven tables with `cpm_` prefix:
 
 All vector columns use HNSW indexes (768-dim) and GIN indexes on tsvector columns for hybrid search.
 
+## How It Works Internally
+
+This section explains the full data lifecycle — how observations get captured, stored, indexed, and retrieved. Understanding this will help you debug, extend, or operate the system.
+
+### The Three Processes
+
+The system runs as three cooperating processes:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Your Coding Agent (OpenCode / Claude Code / Copilot CLI)          │
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────────┐                          │
+│  │  MCP Server  │───>│     Worker       │                          │
+│  │  (stdio)     │    │  (HTTP :37778)   │                          │
+│  │  3 tools     │    │  Express daemon  │                          │
+│  └──────────────┘    └────────┬─────────┘                          │
+│                               │                                     │
+│  ┌──────────────┐             │ withUserContext()                   │
+│  │  Plugin /    │─────────────┘ SET app.user_id = '<hash>'         │
+│  │  Hooks       │                                                   │
+│  └──────────────┘       ┌─────▼─────────────┐                      │
+│                         │ Azure PostgreSQL   │                      │
+│                         │ + pgvector + RLS   │                      │
+│                         └───────────────────┘                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+| Process | Transport | Role |
+|---------|-----------|------|
+| **Worker** (`worker-service.ts`) | Express HTTP on `127.0.0.1:37778` | All business logic: DB queries, embedding generation, session management, observation storage. Runs as a long-lived daemon. |
+| **MCP Server** (`mcp-server.ts`) | JSON-RPC over stdio | Thin proxy that translates MCP tool calls into Worker HTTP requests. Spawned per agent session. |
+| **Plugin / Hooks** (`agent-mem.ts` or `hooks.json`) | Fire-and-forget HTTP POST | Auto-captures tool calls and session lifecycle events. Runs inside the agent process. |
+
+### Data Capture: How Observations Get Created
+
+Observations are captured automatically — no manual action needed. The capture mechanism depends on your agent:
+
+#### OpenCode (Plugin)
+
+The OpenCode plugin (`plugin/opencode/agent-mem.ts`) hooks into two events:
+
+1. **`session.created` / `session.idle`** — Sends `POST /api/sessions/init` and `POST /api/sessions/complete` to the Worker to track session lifecycle.
+2. **`tool.execute.after`** — Fires after every tool call. The plugin:
+   - Filters out trivial tools (`ls`, `pwd`, browser snapshots) and short-output read tools
+   - Truncates large outputs to 2000 characters
+   - Sends `POST /api/observations` with `tool_name`, `tool_input`, `tool_response`, and `project`
+
+#### Claude Code (Hooks)
+
+Claude Code uses shell hooks defined in `plugin/hooks/hooks.json`:
+
+| Hook Event | Fires When | What It Does |
+|------------|-----------|--------------|
+| `SessionStart` | Agent session begins | Starts the Worker daemon, injects recent context |
+| `UserPromptSubmit` | User sends a prompt | Initialises the session in the DB |
+| `PostToolUse` | After any tool call | Stores the tool call as an observation |
+| `Stop` | Session ends | Generates a session summary, marks session complete |
+
+Each hook runs a Node.js script that reads JSON from stdin (provided by Claude Code) and POSTs to the Worker.
+
+#### What Gets Stored Per Observation
+
+When `POST /api/observations` is called, the Worker:
+
+1. **Strips `<private>` tags** — Any content wrapped in `<private>...</private>` is removed before storage
+2. **Computes a content hash** — SHA-256 of the observation text, used for deduplication
+3. **Checks for duplicates** — If an observation with the same `content_hash` already exists for this user, the insert is skipped
+4. **Generates an embedding** — The text (title + body) is sent to the configured embedding provider, producing a 768-dimensional vector
+5. **Builds a tsvector** — PostgreSQL's built-in full-text search index is computed via `to_tsvector('english', ...)`
+6. **Inserts the row** — All fields are written to `cpm_observations` inside a transaction with RLS context set
+
+### Embedding Generation
+
+Embeddings convert text into 768-dimensional vectors for semantic similarity search. Two providers are supported:
+
+| Provider | Model | Dimensions | Latency | Cost |
+|----------|-------|-----------|---------|------|
+| **Nomic** (default) | `nomic-ai/nomic-embed-text-v1` | 768 | ~50ms (local CPU) | Free |
+| **Azure OpenAI** | `text-embedding-3-small` | 768 (truncated from 1536) | ~100ms (API call) | ~$0.02/1M tokens |
+
+**Nomic prefix convention:** Nomic models require task-specific prefixes for optimal results. The Worker automatically prepends `search_document: ` when storing observations and `search_query: ` when searching. Azure OpenAI does not use prefixes.
+
+**Azure OpenAI authentication:** When no API key is configured, the system uses `DefaultAzureCredential` from `@azure/identity`, which automatically chains: Azure CLI login → managed identity → environment variables. Tokens are cached and refreshed 5 minutes before expiry.
+
+### How Search Works (Hybrid Retrieval)
+
+When you call the `search` MCP tool (or `GET /api/search`), the Worker runs a hybrid query combining two ranking signals:
+
+```
+Final Score = (semantic_score × 0.7) + (text_score × 0.3)
+```
+
+**Step by step:**
+
+1. **Embed the query** — The search query is converted to a 768-dim vector (with `search_query:` prefix for Nomic)
+2. **Cosine similarity** — pgvector computes `1 - (embedding <=> query_vector)` for every observation. The `<=>` operator uses the HNSW index for approximate nearest-neighbour search (sub-linear time)
+3. **Full-text rank** — PostgreSQL's `ts_rank_cd()` scores each row's `search_vector` against `plainto_tsquery('english', query)`. The GIN index accelerates this
+4. **Filter** — Results must either match the tsvector OR have a semantic score > 0.3
+5. **Rank** — Results are sorted by the weighted combination (70% semantic, 30% text)
+6. **Limit** — Default 20 results, configurable via `limit` parameter
+
+This hybrid approach catches both semantically similar content (e.g., "authentication" matches "login flow") and exact keyword matches (e.g., error codes, file names).
+
+### Progressive Disclosure: The 3-Tool Pattern
+
+The MCP server exposes three tools designed to minimize token usage:
+
+```
+search (50-100 tokens/result)     →  Scan many results cheaply
+  │
+  ▼
+timeline (200-500 tokens/result)  →  See chronological context
+  │
+  ▼
+get_observations (500-1000 tokens/result)  →  Full details for specific IDs
+```
+
+**Why this matters:** A naive design that returns full observation text for every search result would consume 10-20x more tokens. With progressive disclosure, the agent can scan 20 search results (~1500 tokens), pick 3 interesting ones, and fetch full details (~2500 tokens) — total ~4000 tokens instead of ~30000.
+
+| Tool | Worker Endpoint | Returns | Use Case |
+|------|----------------|---------|----------|
+| `search` | `GET /api/search` | `id, type, project, title, content_preview (200 chars)` | Broad exploration, finding relevant observations |
+| `timeline` | `GET /api/timeline` | `id, type, project, title, text_preview (300 chars)` | Chronological context around an anchor point |
+| `get_observations` | `POST /api/observations/batch` | Full `text, narrative, memory_session_id, created_at` | Deep-dive into specific observations |
+
+### Row Level Security (RLS) in Detail
+
+RLS ensures that users sharing the same database cannot see each other's data. Here's exactly how it works:
+
+**1. User ID derivation:**
+```
+user_id = SHA-256("username@hostname").slice(0, 16)
+```
+For example, `alice@macbook-pro` → `f9b7c930b9856e3c`. This is deterministic — the same user on the same machine always gets the same ID.
+
+**2. Every table has a `user_id` column** and an RLS policy:
+```sql
+ALTER TABLE cpm_observations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cpm_observations FORCE ROW LEVEL SECURITY;
+CREATE POLICY user_isolation ON cpm_observations
+  USING (user_id = current_setting('app.user_id', true))
+  WITH CHECK (user_id = current_setting('app.user_id', true));
+```
+
+**3. Every Worker transaction sets the user context:**
+```typescript
+await client.query('BEGIN');
+await client.query(`SELECT set_config('app.user_id', $1, true)`, [userId]);
+// ... all queries here only see rows where user_id matches ...
+await client.query('COMMIT');
+```
+
+The `true` parameter in `set_config()` makes it transaction-local — safe with connection pooling because the setting vanishes when the transaction ends.
+
+**4. `FORCE ROW LEVEL SECURITY`** means even the table owner (the connection role) is subject to RLS. Without `FORCE`, the DB admin would bypass all policies.
+
+**5. Admin access:** The schema creates a `cpm_admin` role with `BYPASSRLS`. To query all users' data (e.g., from DBeaver), run `SET ROLE cpm_admin;` before your SELECT — in the same execution block (Alt+X in DBeaver, not Ctrl+Enter).
+
+### Session Lifecycle
+
+A session represents one continuous interaction with the coding agent:
+
+```
+Session Start                    Session End
+    │                                │
+    ▼                                ▼
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ init     │→ │ observe  │→ │ observe  │→ │ complete │
+│ session  │  │ tool #1  │  │ tool #N  │  │ + summary│
+└──────────┘  └──────────┘  └──────────┘  └──────────┘
+     │              │              │              │
+     ▼              ▼              ▼              ▼
+cpm_sdk_sessions  cpm_observations (×N)    cpm_session_summaries
+cpm_sessions                               status → 'completed'
+```
+
+**Two session tables exist for different purposes:**
+
+| Table | Purpose | Key Fields |
+|-------|---------|------------|
+| `cpm_sessions` | Lightweight tracking (simple insert, ON CONFLICT DO NOTHING) | `session_id`, `project`, `source` |
+| `cpm_sdk_sessions` | Full lifecycle management | `status` (active/completed/failed), `completed_at`, `prompt_counter`, `user_prompt` |
+
+The `memory_session_id` is derived as `mem_${session_id}` and links observations and summaries back to their session.
+
+### Worker HTTP API Reference
+
+All endpoints require `user_id` (query param or body field) for RLS context.
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/health` | Health check — returns version, uptime, embedding provider |
+| `GET` | `/api/search` | Hybrid search with filters (project, type, date range) |
+| `GET` | `/api/timeline` | Chronological observations around an anchor ID |
+| `POST` | `/api/observations` | Store a new observation (generates embedding + tsvector) |
+| `POST` | `/api/observations/batch` | Fetch full details for an array of observation IDs |
+| `POST` | `/api/sessions/init` | Create or resume a session |
+| `POST` | `/api/sessions/complete` | Mark a session as completed |
+| `POST` | `/api/summaries` | Store a structured session summary |
+| `POST` | `/api/context` | Get recent observations for context injection |
+| `POST` | `/shutdown` | Graceful daemon shutdown |
+
+### Index Strategy
+
+The database uses 25+ indexes optimized for the system's access patterns:
+
+| Index Type | Columns | Purpose |
+|------------|---------|---------|
+| **HNSW** (pgvector) | `embedding vector_cosine_ops` | Approximate nearest-neighbour for semantic search. Sub-linear scan time. |
+| **GIN** (PostgreSQL) | `search_vector` | Full-text search acceleration for tsvector queries |
+| **B-tree** (composite) | `(user_id, project, created_at_epoch)` | Fast filtered time-range queries scoped to a user+project |
+| **B-tree** (unique) | `session_id`, `content_session_id` | Session lookup and deduplication |
+| **B-tree** | `content_hash` | Observation deduplication |
+
+### Deduplication
+
+The system prevents duplicate observations at two levels:
+
+1. **Content hash** — Before inserting, the Worker computes `SHA-256(observation_text)` and checks if a row with the same hash exists for this user. If found, the insert is silently skipped.
+2. **Session ON CONFLICT** — `cpm_sessions` uses `ON CONFLICT (session_id) DO NOTHING` to safely handle repeated session-init calls.
+
+### File and Directory Layout
+
+```
+~/.agent-mem/
+├── settings.json       # All configuration (DATABASE_URL, embedding provider, etc.)
+└── worker.pid          # PID of the running worker daemon
+
+src/
+├── index.ts            # CLI entry point — dispatches commands
+├── servers/
+│   └── mcp-server.ts   # MCP stdio server (3 tools → Worker HTTP)
+├── services/
+│   ├── worker-service.ts     # Express daemon — all business logic
+│   ├── embeddings.ts         # Nomic / Azure OpenAI / noop providers
+│   └── postgres/
+│       ├── schema.ts         # Drizzle ORM table definitions
+│       ├── schema-push.ts    # DDL + indexes + RLS setup
+│       └── client.ts         # Shared DB client utilities
+├── cli/
+│   ├── client.ts             # HTTP client for CLI → Worker communication
+│   ├── commands/             # CLI command implementations
+│   └── handlers/             # Hook handlers (observation, session-complete, etc.)
+├── shared/
+│   ├── settings.ts           # Settings manager (~/.agent-mem/settings.json)
+│   └── logger.ts             # Structured logger
+└── scripts/
+    └── build-plugin.js       # Bundles worker + MCP server into CJS for plugin distribution
+
+plugin/
+├── opencode/
+│   └── agent-mem.ts          # OpenCode plugin (auto-capture)
+├── hooks/
+│   └── hooks.json            # Claude Code hook definitions
+├── .mcp.json                 # MCP server registration for Claude Code
+└── scripts/                  # Built CJS bundles (gitignored, built via npm run build:plugin)
+```
+
 ## CLI Reference
 
 ```
-agent-mem config set <key> <value>    Set a config value
+agent-mem setup                        Interactive one-command setup (config → schema → worker → plugin)
+agent-mem config set <key> <value>     Set a config value
 agent-mem config get <key>             Get a config value
 agent-mem config list                  List all settings
 agent-mem db provision [flags]         Provision Azure PostgreSQL server
