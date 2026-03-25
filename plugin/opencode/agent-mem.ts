@@ -78,7 +78,7 @@ async function workerPost(path: string, body: Record<string, unknown>): Promise<
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");

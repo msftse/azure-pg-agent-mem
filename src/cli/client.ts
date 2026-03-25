@@ -63,6 +63,7 @@ export async function workerPost<T = unknown>(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -91,7 +92,9 @@ export async function workerGet<T = unknown>(
     : base;
   log.debug('GET', { url });
 
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(15_000),
+  });
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
