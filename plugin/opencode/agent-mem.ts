@@ -130,6 +130,8 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
   const userId = resolveUserId();
   const projectName = project?.name || basename(worktree || directory);
 
+  console.error(`[agent-mem] Plugin loaded — project=${projectName} userId=${userId}`);
+
   // Track which sessions we've already initialised, to avoid duplicate inits.
   const initialisedSessions = new Set<string>();
 
@@ -142,8 +144,14 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
     async event({ event }) {
       switch (event.type) {
         case "session.created": {
+          const t0 = Date.now();
           const sessionId = event.properties.info.id;
-          if (initialisedSessions.has(sessionId)) break;
+          console.error(`[agent-mem] ▶ session.created — sessionId=${sessionId}`);
+
+          if (initialisedSessions.has(sessionId)) {
+            console.error(`[agent-mem] ⊘ Session already initialised, skipping`);
+            break;
+          }
           initialisedSessions.add(sessionId);
 
           const userPrompt = event.properties.info.title || "";
@@ -157,12 +165,15 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
             user_prompt: userPrompt,
           });
 
+          console.error(`[agent-mem] ✔ Session registered (${Date.now() - t0}ms)`);
+
           // Initialise observation tracking for summaries.
           sessionObservations.set(sessionId, { tools: [], project: projectName });
 
           // Inject prior memory context — fetch recent observations from the
           // worker and log them so the agent has prior session awareness.
           try {
+            const ctxT0 = Date.now();
             const context = await workerPost("/api/context", {
               user_id: userId,
               project: projectName,
@@ -170,18 +181,23 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
             });
             if (Array.isArray(context) && context.length > 0) {
               console.error(
-                `[agent-mem] Injected ${context.length} prior observations as context`,
+                `[agent-mem] ✔ Injected ${context.length} prior observations as context (${Date.now() - ctxT0}ms)`,
               );
+            } else {
+              console.error(`[agent-mem] No prior observations found (${Date.now() - ctxT0}ms)`);
             }
           } catch {
             // Context injection is best-effort.
+            console.error(`[agent-mem] ✘ Context fetch failed (best-effort, continuing)`);
           }
 
           break;
         }
 
         case "session.idle": {
+          const t0 = Date.now();
           const sessionId = event.properties.sessionID;
+          console.error(`[agent-mem] ▶ session.idle — sessionId=${sessionId}`);
 
           // Mark session as completed.
           await workerPost("/api/sessions/complete", {
@@ -189,9 +205,12 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
             user_id: userId,
           });
 
+          console.error(`[agent-mem] ✔ Session marked complete (${Date.now() - t0}ms)`);
+
           // Generate and store a session summary from tracked observations.
           const tracked = sessionObservations.get(sessionId);
           if (tracked && tracked.tools.length > 0) {
+            const summaryT0 = Date.now();
             const uniqueTools = [...new Set(tracked.tools)];
             const summaryText = `Session used ${tracked.tools.length} tool calls (${uniqueTools.join(", ")}).`;
 
@@ -203,8 +222,14 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
               notes: `Tools used: ${uniqueTools.join(", ")}. Total calls: ${tracked.tools.length}.`,
             });
 
+            console.error(
+              `[agent-mem] ✔ Summary posted — ${tracked.tools.length} tool calls, ${uniqueTools.length} unique tools (${Date.now() - summaryT0}ms)`,
+            );
+
             // Clean up tracking data.
             sessionObservations.delete(sessionId);
+          } else {
+            console.error(`[agent-mem] No tool observations to summarise`);
           }
 
           break;
@@ -223,7 +248,13 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
       const { title, output: toolOutput } = output;
 
       // Filter trivial tools.
-      if (isTrivialTool(toolName, toolOutput || "")) return;
+      if (isTrivialTool(toolName, toolOutput || "")) {
+        console.error(`[agent-mem] ⊘ Skipping trivial tool: ${toolName}`);
+        return;
+      }
+
+      const t0 = Date.now();
+      console.error(`[agent-mem] ▶ tool.execute.after — ${toolName} (session=${sessionID.slice(0, 8)}…)`);
 
       // Track tool usage for session summaries.
       const tracked = sessionObservations.get(sessionID);
@@ -234,6 +265,7 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
       // Ensure the session is initialised (in case we missed session.created).
       if (!initialisedSessions.has(sessionID)) {
         initialisedSessions.add(sessionID);
+        console.error(`[agent-mem] Late session init for ${sessionID.slice(0, 8)}…`);
         await workerPost("/api/sessions/init", {
           session_id: sessionID,
           project: projectName,
@@ -268,6 +300,12 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
         title: title || `${toolName} call`,
         type: "tool_use",
       });
+
+      const elapsed = Date.now() - t0;
+      const outputLen = (toolOutput || "").length;
+      console.error(
+        `[agent-mem] ✔ Observation recorded — ${toolName} (output=${outputLen} chars, ${elapsed}ms)`,
+      );
     },
   };
 };

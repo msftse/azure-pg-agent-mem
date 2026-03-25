@@ -23,21 +23,27 @@ interface SessionCompleteInput {
 // ---------------------------------------------------------------------------
 
 export async function handleSessionComplete(): Promise<void> {
+  const t0 = Date.now();
+  log.info('▶ Stop hook fired — marking session complete');
+
   try {
     const data = await readStdinJson<SessionCompleteInput>();
     const userId = resolveUserId();
 
-    log.debug('Marking session complete', { sessionId: data.session_id });
+    log.info('Completing session', { sessionId: data.session_id });
 
     await workerPost('/api/sessions/complete', {
       session_id: data.session_id,
       user_id: userId,
     });
 
-    log.debug('Session marked complete');
+    const elapsed = Date.now() - t0;
+    log.info('✔ Session marked complete', { sessionId: data.session_id, elapsed_ms: elapsed });
   } catch (err) {
-    log.error('session-complete failed', {
+    const elapsed = Date.now() - t0;
+    log.error('✘ Session-complete failed', {
       error: err instanceof Error ? err.message : String(err),
+      elapsed_ms: elapsed,
     });
     process.exitCode = 1;
   }

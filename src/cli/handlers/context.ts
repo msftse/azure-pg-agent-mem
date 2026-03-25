@@ -56,11 +56,14 @@ function formatTimeline(observations: ContextObservation[]): string {
 // ---------------------------------------------------------------------------
 
 export async function handleContext(): Promise<void> {
+  const t0 = Date.now();
+  log.info('▶ SessionStart hook fired — fetching prior context');
+
   try {
     const userId = resolveUserId();
     const limit = getSetting('CONTEXT_OBSERVATIONS');
 
-    log.debug('Fetching context', { userId, limit });
+    log.info('Requesting context', { userId, limit });
 
     // Worker POST /api/context returns a flat array of observation rows.
     const data = await workerPost<ContextObservation[]>('/api/context', {
@@ -74,11 +77,14 @@ export async function handleContext(): Promise<void> {
     // Write to stdout – Claude Code captures this as injected context.
     process.stdout.write(md);
 
-    log.debug('Context injected', { count: observations.length });
+    const elapsed = Date.now() - t0;
+    log.info('✔ Context injected', { count: observations.length, elapsed_ms: elapsed });
   } catch (err) {
+    const elapsed = Date.now() - t0;
     // Context injection is best-effort; failing silently is acceptable.
-    log.warn('context fetch failed', {
+    log.warn('✘ Context fetch failed', {
       error: err instanceof Error ? err.message : String(err),
+      elapsed_ms: elapsed,
     });
   }
 }

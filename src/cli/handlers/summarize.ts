@@ -26,11 +26,17 @@ interface SummarizeInput {
 // ---------------------------------------------------------------------------
 
 export async function handleSummarize(): Promise<void> {
+  const t0 = Date.now();
+  log.info('▶ Stop hook fired — posting session summary');
+
   try {
     const data = await readStdinJson<SummarizeInput>();
     const userId = resolveUserId();
 
-    log.debug('Posting session summary', { sessionId: data.session_id });
+    log.info('Posting summary', {
+      sessionId: data.session_id,
+      summaryLen: (data.summary ?? '').length,
+    });
 
     await workerPost('/api/summaries', {
       session_id: data.session_id,
@@ -39,10 +45,13 @@ export async function handleSummarize(): Promise<void> {
       cwd: data.cwd,
     });
 
-    log.debug('Summary posted');
+    const elapsed = Date.now() - t0;
+    log.info('✔ Summary posted', { sessionId: data.session_id, elapsed_ms: elapsed });
   } catch (err) {
-    log.error('summarize failed', {
+    const elapsed = Date.now() - t0;
+    log.error('✘ Summarize failed', {
       error: err instanceof Error ? err.message : String(err),
+      elapsed_ms: elapsed,
     });
     process.exitCode = 1;
   }

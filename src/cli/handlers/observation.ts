@@ -61,20 +61,24 @@ function isTrivial(input: ObservationInput): boolean {
 // ---------------------------------------------------------------------------
 
 export async function handleObservation(): Promise<void> {
+  const t0 = Date.now();
+  log.info('▶ PostToolUse hook fired');
+
   try {
     const data = await readStdinJson<ObservationInput>();
 
     if (isTrivial(data)) {
-      log.debug('Skipping trivial tool', { tool: data.tool_name });
+      log.info('⊘ Skipping trivial tool', { tool: data.tool_name });
       return;
     }
 
     const userId = resolveUserId();
     const project = path.basename(data.cwd);
 
-    log.debug('Recording observation', {
+    log.info('Recording observation', {
       tool: data.tool_name,
       sessionId: data.session_id,
+      responseLen: (data.tool_response || '').length,
     });
 
     await workerPost('/api/observations', {
@@ -86,10 +90,13 @@ export async function handleObservation(): Promise<void> {
       project,
     });
 
-    log.debug('Observation recorded');
+    const elapsed = Date.now() - t0;
+    log.info('✔ Observation recorded', { tool: data.tool_name, elapsed_ms: elapsed });
   } catch (err) {
-    log.error('observation failed', {
+    const elapsed = Date.now() - t0;
+    log.error('✘ Observation failed', {
       error: err instanceof Error ? err.message : String(err),
+      elapsed_ms: elapsed,
     });
     process.exitCode = 1;
   }

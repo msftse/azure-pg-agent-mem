@@ -27,14 +27,18 @@ interface SessionInitInput {
 // ---------------------------------------------------------------------------
 
 export async function handleSessionInit(): Promise<void> {
+  const t0 = Date.now();
+  log.info('▶ UserPromptSubmit hook fired — initialising session');
+
   try {
     const data = await readStdinJson<SessionInitInput>();
     const userId = resolveUserId();
     const project = path.basename(data.cwd);
 
-    log.debug('Initialising session', {
+    log.info('Registering session', {
       sessionId: data.session_id,
       project,
+      promptPreview: (data.user_message || '').slice(0, 80),
     });
 
     await workerPost('/api/sessions/init', {
@@ -44,10 +48,13 @@ export async function handleSessionInit(): Promise<void> {
       user_prompt: data.user_message,
     });
 
-    log.debug('Session initialised');
+    const elapsed = Date.now() - t0;
+    log.info('✔ Session initialised', { sessionId: data.session_id, elapsed_ms: elapsed });
   } catch (err) {
-    log.error('session-init failed', {
+    const elapsed = Date.now() - t0;
+    log.error('✘ Session-init failed', {
       error: err instanceof Error ? err.message : String(err),
+      elapsed_ms: elapsed,
     });
     process.exitCode = 1;
   }
