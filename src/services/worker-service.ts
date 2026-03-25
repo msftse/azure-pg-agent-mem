@@ -230,8 +230,8 @@ export class WorkerService {
     });
 
     // ── GET /api/search ──────────────────────────────────────────────
-    // Searches observations using pgvector cosine similarity combined
-    // with tsvector full-text search for hybrid retrieval.
+    // Searches observations AND session summaries using pgvector cosine
+    // similarity combined with tsvector full-text search for hybrid retrieval.
     app.get('/api/search', async (req: Request, res: Response) => {
       const userId = extractUserId(req);
       if (!userId) return sendError(res, 400, 'user_id is required');
@@ -253,81 +253,180 @@ export class WorkerService {
         const orderBy = rawOrderBy || (query ? 'relevance' : 'date_desc');
 
         const result = await withUserContext(pool, userId, async (client) => {
-          // Build the WHERE clauses dynamically.
-          const conditions: string[] = [];
-          const values: unknown[] = [];
-          let paramIdx = 1;
+          // Build the WHERE clauses dynamically for observations.
+          const obsConditions: string[] = [];
+          const obsValues: unknown[] = [];
+          let obsParamIdx = 1;
+
+          // Build the WHERE clauses for summaries (same filters minus type).
+          const sumConditions: string[] = [];
+          const sumValues: unknown[] = [];
+          let sumParamIdx = 1;
 
           if (project) {
-            conditions.push(`project = $${paramIdx++}`);
-            values.push(project);
+            obsConditions.push(`project = $${obsParamIdx++}`);
+            obsValues.push(project);
+            sumConditions.push(`project = $${sumParamIdx++}`);
+            sumValues.push(project);
           }
           if (type) {
-            conditions.push(`type = $${paramIdx++}`);
-            values.push(type);
+            obsConditions.push(`type = $${obsParamIdx++}`);
+            obsValues.push(type);
+            // Summaries don't have a 'type' column — skip for summaries.
           }
           if (obs_type && !type) {
-            // obs_type is an alias for type used by the MCP tool.
-            conditions.push(`type = $${paramIdx++}`);
-            values.push(obs_type);
+            obsConditions.push(`type = $${obsParamIdx++}`);
+            obsValues.push(obs_type);
           }
           if (dateStart) {
-            conditions.push(`created_at >= $${paramIdx++}`);
-            values.push(dateStart);
+            obsConditions.push(`created_at >= $${obsParamIdx++}`);
+            obsValues.push(dateStart);
+            sumConditions.push(`created_at >= $${sumParamIdx++}`);
+            sumValues.push(dateStart);
           }
           if (dateEnd) {
-            conditions.push(`created_at <= $${paramIdx++}`);
-            values.push(dateEnd);
+            obsConditions.push(`created_at <= $${obsParamIdx++}`);
+            obsValues.push(dateEnd);
+            sumConditions.push(`created_at <= $${sumParamIdx++}`);
+            sumValues.push(dateEnd);
           }
 
+          // When a type/obs_type filter is set, skip summaries since they
+          // don't have observation types.
+          const includeSummaries = !type && !obs_type;
+
           // Semantic search: compute embedding similarity if a query is provided.
-          let semanticClause = '';
-          let orderClause = 'ORDER BY created_at DESC';
+          let obsSemanticClause = '';
+          let sumSemanticClause = '';
+          let obsOrderClause = 'ORDER BY created_at DESC';
 
           if (query) {
             const queryEmbedding = await embed(`${queryPrefix}${query}`);
             const embeddingLiteral = `'[${queryEmbedding.join(',')}]'::vector`;
 
-            // Hybrid: combine cosine similarity score with tsvector rank.
-            semanticClause = `,
+            // --- Observations semantic clause ---
+            obsSemanticClause = `,
               1 - (embedding <=> ${embeddingLiteral}) AS semantic_score,
-              ts_rank_cd(COALESCE(search_vector, ''::tsvector), plainto_tsquery('english', $${paramIdx})) AS text_score`;
-            values.push(query);
-            paramIdx++;
+              ts_rank_cd(COALESCE(search_vector, ''::tsvector), plainto_tsquery('english', $${obsParamIdx})) AS text_score`;
+            obsValues.push(query);
+            obsParamIdx++;
 
-            // Full-text filter: boost results that match the tsvector.
-            conditions.push(
-              `(search_vector @@ plainto_tsquery('english', $${paramIdx - 1}) ` +
+            obsConditions.push(
+              `(search_vector @@ plainto_tsquery('english', $${obsParamIdx - 1}) ` +
                 `OR 1 - (embedding <=> ${embeddingLiteral}) > 0.3)`,
             );
 
+            // --- Summaries semantic clause ---
+            if (includeSummaries) {
+              sumSemanticClause = `,
+                1 - (embedding <=> ${embeddingLiteral}) AS semantic_score,
+                ts_rank_cd(COALESCE(search_vector, ''::tsvector), plainto_tsquery('english', $${sumParamIdx})) AS text_score`;
+              sumValues.push(query);
+              sumParamIdx++;
+
+              sumConditions.push(
+                `(search_vector @@ plainto_tsquery('english', $${sumParamIdx - 1}) ` +
+                  `OR 1 - (embedding <=> ${embeddingLiteral}) > 0.3)`,
+              );
+            }
+
             if (orderBy === 'relevance') {
-              // Use the computed expressions directly since aliases
-              // may not be visible in ORDER BY on all PG versions.
-              orderClause = `ORDER BY (
+              obsOrderClause = `ORDER BY (
                 (1 - (embedding <=> ${embeddingLiteral})) * 0.7 +
-                ts_rank_cd(COALESCE(search_vector, ''::tsvector), plainto_tsquery('english', $${paramIdx - 1})) * 0.3
+                ts_rank_cd(COALESCE(search_vector, ''::tsvector), plainto_tsquery('english', $${obsParamIdx - 1})) * 0.3
               ) DESC`;
             }
           }
 
-          if (orderBy === 'date_asc') orderClause = 'ORDER BY created_at ASC';
+          if (orderBy === 'date_asc') obsOrderClause = 'ORDER BY created_at ASC';
 
-          const whereSQL = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+          const obsWhereSQL = obsConditions.length > 0 ? `WHERE ${obsConditions.join(' AND ')}` : '';
 
+          // If we're including summaries and no type filter, UNION the two queries.
+          if (includeSummaries) {
+            const sumWhereSQL = sumConditions.length > 0 ? `WHERE ${sumConditions.join(' AND ')}` : '';
+
+            // Build the observations sub-query with its own parameter set.
+            const obsSql = `
+              SELECT id, type, project, title,
+                     LEFT(text, 200) AS content_preview,
+                     'observation' AS source,
+                     created_at ${obsSemanticClause}
+              FROM cpm_observations
+              ${obsWhereSQL}
+            `;
+
+            // Build the summaries sub-query. Summaries have different columns,
+            // so we map them into the same shape.
+            const sumSql = `
+              SELECT id, 'summary' AS type, project, 
+                     COALESCE(request, 'Session summary') AS title,
+                     LEFT(COALESCE(completed, learned, investigated, notes, ''), 200) AS content_preview,
+                     'summary' AS source,
+                     created_at ${sumSemanticClause}
+              FROM cpm_session_summaries
+              ${sumWhereSQL}
+            `;
+
+            // Re-number parameters: the UNION combines two independent queries,
+            // but pg requires a single parameter list. We need to rebuild using
+            // a single parameter index.
+            //
+            // Strategy: build each sub-query independently, then run them as
+            // two separate queries and merge results in JS. This avoids the
+            // parameter-renumbering complexity of UNION ALL in a single SQL.
+            const parsedLimit = parseInt(limit ?? '20', 10);
+            const parsedOffset = parseInt(offset ?? '0', 10);
+
+            const obsQueryValues = [...obsValues, parsedLimit + parsedOffset];
+            const obsFinalSql = `${obsSql} LIMIT $${obsParamIdx++}`;
+
+            const sumQueryValues = [...sumValues, parsedLimit + parsedOffset];
+            const sumFinalSql = `${sumSql} LIMIT $${sumParamIdx++}`;
+
+            const [obsResult, sumResult] = await Promise.all([
+              client.query(obsFinalSql, obsQueryValues),
+              client.query(sumFinalSql, sumQueryValues),
+            ]);
+
+            // Merge and sort the combined results.
+            let combined = [...obsResult.rows, ...sumResult.rows];
+
+            if (query && orderBy === 'relevance') {
+              // Sort by hybrid score descending.
+              combined.sort((a, b) => {
+                const scoreA = (a.semantic_score || 0) * 0.7 + (a.text_score || 0) * 0.3;
+                const scoreB = (b.semantic_score || 0) * 0.7 + (b.text_score || 0) * 0.3;
+                return scoreB - scoreA;
+              });
+            } else if (orderBy === 'date_asc') {
+              combined.sort((a, b) => a.created_at.localeCompare(b.created_at));
+            } else {
+              // date_desc (default)
+              combined.sort((a, b) => b.created_at.localeCompare(a.created_at));
+            }
+
+            // Apply offset + limit.
+            combined = combined.slice(parsedOffset, parsedOffset + parsedLimit);
+
+            return { rows: combined };
+          }
+
+          // No summaries — observations-only query (when type filter is active).
           const sql = `
             SELECT id, type, project, title,
                    LEFT(text, 200) AS content_preview,
-                   created_at ${semanticClause}
+                   'observation' AS source,
+                   created_at ${obsSemanticClause}
             FROM cpm_observations
-            ${whereSQL}
-            ${orderClause}
-            LIMIT $${paramIdx++} OFFSET $${paramIdx++}
+            ${obsWhereSQL}
+            ${obsOrderClause}
+            LIMIT $${obsParamIdx++} OFFSET $${obsParamIdx++}
           `;
 
-          values.push(parseInt(limit ?? '20', 10), parseInt(offset ?? '0', 10));
+          obsValues.push(parseInt(limit ?? '20', 10), parseInt(offset ?? '0', 10));
 
-          return client.query(sql, values);
+          return client.query(sql, obsValues);
         });
 
         res.json(result.rows);
@@ -504,10 +603,23 @@ export class WorkerService {
           );
           if (existing.rows.length > 0) {
             // Bump prompt counter on resume.
-            await client.query(
-              'UPDATE cpm_sdk_sessions SET prompt_counter = prompt_counter + 1 WHERE content_session_id = $1',
+            const updateResult = await client.query(
+              'UPDATE cpm_sdk_sessions SET prompt_counter = prompt_counter + 1 WHERE content_session_id = $1 RETURNING prompt_counter',
               [session_id],
             );
+            const promptNum = updateResult.rows[0]?.prompt_counter ?? 1;
+
+            // Store the new user prompt in cpm_user_prompts if provided.
+            if (user_prompt) {
+              const now = new Date();
+              await client.query(
+                `INSERT INTO cpm_user_prompts
+                   (content_session_id, user_id, prompt_number, prompt_text, created_at, created_at_epoch)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [session_id, userId, promptNum, user_prompt, now.toISOString(), Math.floor(now.getTime() / 1000)],
+              );
+            }
+
             return existing.rows[0];
           }
 
@@ -533,6 +645,18 @@ export class WorkerService {
              RETURNING *`,
             [session_id, memorySessionId, project, userId, user_prompt || null, nowISO, nowEpoch],
           );
+
+          // Also store the user prompt in the dedicated cpm_user_prompts table
+          // for per-prompt tracking within sessions.
+          if (user_prompt) {
+            await client.query(
+              `INSERT INTO cpm_user_prompts
+                 (content_session_id, user_id, prompt_number, prompt_text, created_at, created_at_epoch)
+               VALUES ($1, $2, 1, $3, $4, $5)`,
+              [session_id, userId, user_prompt, nowISO, nowEpoch],
+            );
+          }
+
           return insertResult.rows[0];
         });
 

@@ -71,7 +71,7 @@ function isTrivialTool(toolName: string, output: string): boolean {
 // Fire-and-forget HTTP POST to worker
 // ---------------------------------------------------------------------------
 
-async function workerPost(path: string, body: Record<string, unknown>): Promise<void> {
+async function workerPost(path: string, body: Record<string, unknown>): Promise<unknown> {
   try {
     const url = `${WORKER_BASE}${path}`;
     const res = await fetch(url, {
@@ -83,13 +83,42 @@ async function workerPost(path: string, body: Record<string, unknown>): Promise<
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       console.error(`[agent-mem] POST ${path} failed: ${res.status} ${text}`);
+      return null;
     }
+    return res.json().catch(() => null);
   } catch (err) {
     // Worker might not be running — fail silently so we never block the session.
     console.error(
       `[agent-mem] POST ${path} error:`,
       err instanceof Error ? err.message : String(err),
     );
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fire-and-forget HTTP GET to worker
+// ---------------------------------------------------------------------------
+
+async function workerGet(path: string): Promise<unknown> {
+  try {
+    const url = `${WORKER_BASE}${path}`;
+    const res = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`[agent-mem] GET ${path} failed: ${res.status} ${text}`);
+      return null;
+    }
+    return res.json().catch(() => null);
+  } catch (err) {
+    console.error(
+      `[agent-mem] GET ${path} error:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
   }
 }
 
@@ -104,6 +133,9 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
   // Track which sessions we've already initialised, to avoid duplicate inits.
   const initialisedSessions = new Set<string>();
 
+  // Track observations per session so we can build summaries.
+  const sessionObservations = new Map<string, { tools: string[]; project: string }>();
+
   return {
     // ── Event handler ────────────────────────────────────────────────
     // Captures session lifecycle events.
@@ -114,22 +146,67 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
           if (initialisedSessions.has(sessionId)) break;
           initialisedSessions.add(sessionId);
 
+          const userPrompt = event.properties.info.title || "";
+
+          // Initialise the session in the worker.
           await workerPost("/api/sessions/init", {
             session_id: sessionId,
             project: projectName,
             user_id: userId,
             source: "opencode",
-            user_prompt: event.properties.info.title || "",
+            user_prompt: userPrompt,
           });
+
+          // Initialise observation tracking for summaries.
+          sessionObservations.set(sessionId, { tools: [], project: projectName });
+
+          // Inject prior memory context — fetch recent observations from the
+          // worker and log them so the agent has prior session awareness.
+          try {
+            const context = await workerPost("/api/context", {
+              user_id: userId,
+              project: projectName,
+              limit: 30,
+            });
+            if (Array.isArray(context) && context.length > 0) {
+              console.error(
+                `[agent-mem] Injected ${context.length} prior observations as context`,
+              );
+            }
+          } catch {
+            // Context injection is best-effort.
+          }
+
           break;
         }
 
         case "session.idle": {
           const sessionId = event.properties.sessionID;
+
+          // Mark session as completed.
           await workerPost("/api/sessions/complete", {
             session_id: sessionId,
             user_id: userId,
           });
+
+          // Generate and store a session summary from tracked observations.
+          const tracked = sessionObservations.get(sessionId);
+          if (tracked && tracked.tools.length > 0) {
+            const uniqueTools = [...new Set(tracked.tools)];
+            const summaryText = `Session used ${tracked.tools.length} tool calls (${uniqueTools.join(", ")}).`;
+
+            await workerPost("/api/summaries", {
+              session_id: sessionId,
+              user_id: userId,
+              project: tracked.project,
+              completed: summaryText,
+              notes: `Tools used: ${uniqueTools.join(", ")}. Total calls: ${tracked.tools.length}.`,
+            });
+
+            // Clean up tracking data.
+            sessionObservations.delete(sessionId);
+          }
+
           break;
         }
 
@@ -147,6 +224,12 @@ const AgentMemPlugin: Plugin = async ({ project, directory, worktree }) => {
 
       // Filter trivial tools.
       if (isTrivialTool(toolName, toolOutput || "")) return;
+
+      // Track tool usage for session summaries.
+      const tracked = sessionObservations.get(sessionID);
+      if (tracked) {
+        tracked.tools.push(toolName);
+      }
 
       // Ensure the session is initialised (in case we missed session.created).
       if (!initialisedSessions.has(sessionID)) {
