@@ -394,10 +394,16 @@ export class WorkerService {
             const parsedLimit = parseInt(limit ?? '20', 10);
             const parsedOffset = parseInt(offset ?? '0', 10);
 
-            const obsQueryValues = [...obsValues, parsedLimit + parsedOffset];
-            const obsFinalSql = `${obsSql} LIMIT $${obsParamIdx++}`;
+            // Fetch a larger candidate pool from each source so the JS-side
+            // hybrid ranking has enough rows to produce high-quality top-K.
+            // Without this, the SQL LIMIT may discard highly relevant rows
+            // before ranking can promote them.
+            const fetchPool = Math.max(parsedLimit + parsedOffset, 50);
 
-            const sumQueryValues = [...sumValues, parsedLimit + parsedOffset];
+            const obsQueryValues = [...obsValues, fetchPool];
+            const obsFinalSql = `${obsSql} ${obsOrderClause} LIMIT $${obsParamIdx++}`;
+
+            const sumQueryValues = [...sumValues, fetchPool];
             const sumFinalSql = `${sumSql} LIMIT $${sumParamIdx++}`;
 
             const [obsResult, sumResult] = await Promise.all([
