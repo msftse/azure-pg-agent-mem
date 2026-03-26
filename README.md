@@ -631,6 +631,75 @@ plugin/
 └── scripts/                  # Built CJS bundles (gitignored, built via npm run build:plugin)
 ```
 
+## Performance Benchmarks
+
+We maintain a benchmark suite that measures how much agent-mem improves an AI agent's ability to recall prior session knowledge. The benchmark compares **"with memory"** (agent queries the search endpoint) against **"without memory"** (agent starts fresh with zero knowledge — every question scores 0%).
+
+### Headline Results
+
+| Metric | Without Memory | With Memory | Improvement |
+|--------|:-------------:|:-----------:|:-----------:|
+| **Recall Accuracy** (Top-10) | 0.0% | **91.7%** | **+91.7%** |
+| Top-1 Hit Rate | 0.0% | 50.0% | +50.0% |
+| Top-3 Hit Rate | 0.0% | 50.0% | +50.0% |
+| Top-5 Hit Rate | 0.0% | 58.3% | +58.3% |
+
+Tested against 568 real observations from development sessions on Azure PostgreSQL with `text-embedding-3-small` embeddings.
+
+### Recall by Category
+
+The benchmark tests 12 questions across 5 categories of knowledge that an agent typically needs to recall:
+
+| Category | Questions | Score | Examples |
+|----------|:---------:|:-----:|----------|
+| **Factual Recall** | 4 | **100%** | Server hostname, embedding model, resource group, worker port |
+| **Architecture** | 2 | **100%** | 3-process system design, plugin-worker communication pattern |
+| **Configuration** | 3 | **100%** | Auth methods, settings path, OpenAI endpoint |
+| **Bugfix** | 1 | **100%** | Root cause of the RLS BYPASSRLS security bug |
+| **Discovery** | 2 | 50% | Embedding dimensions (hit), pgvector enable steps (miss) |
+
+The single miss (pgvector `azure.extensions` server parameter) reflects a very specific keyword that wasn't stored in any observation's natural-language text.
+
+### Latency
+
+| Operation | Avg Latency | Notes |
+|-----------|:-----------:|-------|
+| Semantic search | **1,389 ms** | Includes Azure OpenAI embedding generation (~800ms) + DB query |
+| Context injection | **868 ms** | Fetches 20-30 recent observations for session startup |
+| Observation write | **1,321 ms** | Embedding generation + DB insert with deduplication |
+| Timeline fetch | **821 ms** | 20 chronological observations |
+| Health check | **< 1 ms** | In-process, no DB round-trip |
+
+> Latency is dominated by the Azure OpenAI embedding API call. Using local Nomic embeddings reduces search latency to ~200ms.
+
+### Concurrent Load
+
+| Scenario | Total Time | Per-Operation |
+|----------|:----------:|:-------------:|
+| 10 parallel searches | 4,352 ms | 435 ms avg |
+| 5 parallel writes | 1,147 ms | 229 ms avg |
+
+The worker handles concurrent requests efficiently via the PostgreSQL connection pool. Parallel operations benefit from batched embedding calls.
+
+### How the Benchmark Works
+
+The benchmark suite (`tests/benchmark.test.ts`) runs 22 tests across 6 sections:
+
+1. **Recall Accuracy** — 12 natural-language questions (e.g., *"What PostgreSQL server hostname do we use?"*) are sent to `/api/search`. Each question defines expected keywords that must appear somewhere in the top-10 results for a "hit".
+2. **Search Relevance** — Computes hit rates at Top-1, Top-3, Top-5, and Top-10 to measure ranking quality.
+3. **Context Quality** — Verifies that the context injection endpoint returns observations with correct fields and respects project-scoping filters.
+4. **Latency** — Measures end-to-end response times for search, timeline, write, and health check operations.
+5. **Concurrent Load** — Fires 10 parallel searches and 5 parallel writes to test connection pooling under load.
+6. **Final Report** — Generates a formatted ASCII report with all metrics.
+
+```bash
+# Run the benchmark (requires worker running + real observation data)
+npx tsx src/index.ts start
+npx vitest run tests/benchmark.test.ts
+```
+
+See [`BENCHMARK.md`](BENCHMARK.md) for the full report with methodology details.
+
 ## CLI Reference
 
 ```
