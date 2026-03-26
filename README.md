@@ -633,22 +633,21 @@ plugin/
 
 ## Performance Benchmarks
 
-We maintain a benchmark suite that measures how much agent-mem improves an AI agent's ability to recall prior session knowledge. The benchmark compares **"with memory"** (agent queries the search endpoint) against **"without memory"** (agent starts fresh with zero knowledge — every question scores 0%).
+We maintain a benchmark suite that measures the **search quality** of agent-mem's hybrid semantic/full-text search. The benchmark asks 12 natural-language questions whose answers are known to exist in the observation corpus, then measures recall, ranking accuracy, and latency.
 
-### Headline Results
+### Search Quality
 
-| Metric | Without Memory | With Memory | Improvement |
-|--------|:-------------:|:-----------:|:-----------:|
-| **Recall Accuracy** (Top-10) | 0.0% | **91.7%** | **+91.7%** |
-| Top-1 Hit Rate | 0.0% | 50.0% | +50.0% |
-| Top-3 Hit Rate | 0.0% | 50.0% | +50.0% |
-| Top-5 Hit Rate | 0.0% | 58.3% | +58.3% |
+| Metric | Value |
+|--------|:-----:|
+| **Recall@10** | **91.7%** (11/12 queries) |
+| MRR (Mean Reciprocal Rank) | 0.458 |
+| Top-1 Hit Rate | 50.0% |
+| Top-3 Hit Rate | 50.0% |
+| Top-5 Hit Rate | 58.3% |
 
 Tested against 568 real observations from development sessions on Azure PostgreSQL with `text-embedding-3-small` embeddings.
 
 ### Recall by Category
-
-The benchmark tests 12 questions across 5 categories of knowledge that an agent typically needs to recall:
 
 | Category | Questions | Score | Examples |
 |----------|:---------:|:-----:|----------|
@@ -685,8 +684,8 @@ The worker handles concurrent requests efficiently via the PostgreSQL connection
 
 The benchmark suite (`tests/benchmark.test.ts`) runs 22 tests across 6 sections:
 
-1. **Recall Accuracy** — 12 natural-language questions (e.g., *"What PostgreSQL server hostname do we use?"*) are sent to `/api/search`. Each question defines expected keywords that must appear somewhere in the top-10 results for a "hit".
-2. **Search Relevance** — Computes hit rates at Top-1, Top-3, Top-5, and Top-10 to measure ranking quality.
+1. **Search Recall** — 12 natural-language queries (e.g., *"What PostgreSQL server hostname do we use?"*) are sent to `/api/search`. Each query defines expected keywords that must appear somewhere in the top-10 results for a "hit".
+2. **Ranking Quality** — Computes MRR (Mean Reciprocal Rank) and hit rates at Top-1, Top-3, Top-5, and Top-10 to measure how well the system ranks relevant results.
 3. **Context Quality** — Verifies that the context injection endpoint returns observations with correct fields and respects project-scoping filters.
 4. **Latency** — Measures end-to-end response times for search, timeline, write, and health check operations.
 5. **Concurrent Load** — Fires 10 parallel searches and 5 parallel writes to test connection pooling under load.

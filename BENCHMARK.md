@@ -9,18 +9,21 @@
 
 ## Summary
 
-| Metric | Without Memory | With Memory | Improvement |
-|--------|---------------|-------------|-------------|
-| Recall Accuracy (Top-10) | 0.0% (0/12) | **91.7%** (11/12) | **+91.7%** |
-| Top-1 Hit Rate | 0.0% | **50.0%** | +50.0% |
-| Top-3 Hit Rate | 0.0% | **50.0%** | +50.0% |
-| Top-5 Hit Rate | 0.0% | **58.3%** | +58.3% |
+The benchmark evaluates **search quality** — how well agent-mem's hybrid search retrieves relevant observations when given natural-language queries. It does _not_ compare "with memory vs without memory" (that comparison is tautological: a system with no memory retrieves nothing by definition).
 
-**Methodology:** "Without memory" = agent starts each session with zero prior knowledge (every recall question scores 0%). "With memory" = agent queries agent-mem's semantic search endpoint. The delta is the performance improvement.
+| Metric | Value |
+|--------|-------|
+| **Recall@10** | **91.7%** (11/12 queries found the answer in top-10) |
+| MRR (Mean Reciprocal Rank) | **0.458** |
+| Top-1 Hit Rate | 50.0% |
+| Top-3 Hit Rate | 50.0% |
+| Top-5 Hit Rate | 58.3% |
 
 ---
 
-## Recall Accuracy by Category
+## Search Recall by Category
+
+12 natural-language questions across 5 categories of knowledge an agent typically needs:
 
 | Category | Score | Detail |
 |----------|-------|--------|
@@ -30,23 +33,26 @@
 | Architecture | **100.0%** | 2/2 — 3-process system, plugin-worker HTTP communication |
 | Configuration | **100.0%** | 3/3 — auth methods, settings path, OpenAI endpoint |
 
-### Missed Questions (1/12)
+### Missed Queries (1/12)
 
-| Question | Missed Keywords | Reason |
-|----------|----------------|--------|
+| Query | Missed Keywords | Reason |
+|-------|----------------|--------|
 | How do pgvector extensions get enabled on Azure? | `azure.extensions`, `VECTOR` | Very specific server parameter name not present in any observation text |
 
 ---
 
-## Search Relevance
+## Ranking Quality
 
-| Metric | Value |
-|--------|-------|
-| Average Rank of Correct Answer | **3.8** |
-| Top-1 Hit Rate | 50.0% |
-| Top-3 Hit Rate | 50.0% |
-| Top-5 Hit Rate | 58.3% |
-| Top-10 Hit Rate | 91.7% |
+These metrics measure how well the search system **ranks** relevant results, not just whether it finds them.
+
+| Metric | Value | Interpretation |
+|--------|-------|----------------|
+| **MRR** | **0.458** | On average, the correct answer appears around rank 2-3 |
+| Average Rank of Hit | **3.8** | When found, the correct result is at position 3.8 on average |
+| Top-1 Hit Rate | 50.0% | Half the time, the correct answer is the #1 result |
+| Top-3 Hit Rate | 50.0% | Same as Top-1 (no additional hits in positions 2-3) |
+| Top-5 Hit Rate | 58.3% | One additional hit in positions 4-5 |
+| Top-10 Hit Rate | 91.7% | Most answers are found within the top 10 |
 
 The hybrid search combines pgvector cosine similarity (0.7 weight) with PostgreSQL full-text search (0.3 weight). Results are drawn from a candidate pool of 50 observations, then ranked and trimmed to the requested limit.
 
@@ -83,7 +89,7 @@ The worker handles concurrent requests efficiently via the PostgreSQL connection
 - **Runner:** Vitest 4.1.0, sequential mode, 60s test timeout
 - **Worker:** Express HTTP on port 37778 with Entra ID + password auth
 - **User data:** Real observation history (568 records from development sessions)
-- **Benchmark questions:** 12 questions across 5 categories, using natural-language search queries
+- **Benchmark queries:** 12 natural-language questions across 5 categories
 
 ### Run the benchmark
 

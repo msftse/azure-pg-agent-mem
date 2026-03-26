@@ -1,21 +1,24 @@
 /**
  * agent-mem Performance Benchmark Suite
  *
- * Measures how much agent-mem improves an AI agent's ability to recall
- * prior session knowledge. Compares "with memory" vs "without memory"
- * across four dimensions:
+ * Measures search quality, ranking accuracy, and operational performance
+ * of agent-mem's hybrid semantic/full-text search system. Tests four
+ * dimensions:
  *
- *   1. Recall Accuracy  — Can the agent answer factual questions about past work?
- *   2. Search Relevance — Does semantic search rank the correct result in top-K?
- *   3. Context Quality  — Does context injection surface relevant prior observations?
- *   4. Latency          — How fast are the key operations (search, context, write)?
+ *   1. Search Recall     — Can the search system find answers to natural-language
+ *                          queries within the observation corpus?
+ *   2. Ranking Quality   — Are correct results ranked near the top? (MRR, Top-K)
+ *   3. Context Quality   — Does context injection surface relevant observations?
+ *   4. Latency & Load    — How fast are the key operations under single and
+ *                          concurrent workloads?
  *
  * Methodology:
- *   - "Without memory" baseline: agent starts each session with zero knowledge
- *     of prior sessions. Every recall question scores 0%.
- *   - "With memory": agent queries agent-mem search/context endpoints and can
- *     retrieve facts, decisions, and discoveries from prior sessions.
- *   - The delta between the two is the performance improvement.
+ *   - 12 natural-language questions whose answers are known to exist in the
+ *     observation corpus. Each question defines expected keywords that must
+ *     appear in the top-10 results for a "hit".
+ *   - Ranking quality is measured via Mean Reciprocal Rank (MRR) and Top-K
+ *     hit rates (K = 1, 3, 5, 10).
+ *   - Latency is measured end-to-end including Azure OpenAI embedding calls.
  *
  * Prerequisites:
  *   - Worker running on port 37778
@@ -193,19 +196,12 @@ interface SearchResult {
 interface QuestionResult {
   question: string;
   category: string;
-  withMemory: {
-    found: boolean;
-    rank: number | null;      // position in results (1-indexed), null if not found
-    latencyMs: number;
-    topResultTitle: string;
-    matchedKeywords: string[];
-    missedKeywords: string[];
-  };
-  withoutMemory: {
-    found: false;
-    rank: null;
-    latencyMs: 0;
-  };
+  found: boolean;
+  rank: number | null;      // position in results (1-indexed), null if not found
+  latencyMs: number;
+  topResultTitle: string;
+  matchedKeywords: string[];
+  missedKeywords: string[];
 }
 
 const benchmarkResults: QuestionResult[] = [];
@@ -293,23 +289,16 @@ describe('1. Recall Accuracy — With Memory vs Without Memory', () => {
       benchmarkResults.push({
         question: q.question,
         category: q.category,
-        withMemory: {
-          found,
-          rank,
-          latencyMs,
-          topResultTitle: String(topTitle),
-          matchedKeywords,
-          missedKeywords,
-        },
-        withoutMemory: {
-          found: false,
-          rank: null,
-          latencyMs: 0,
-        },
+        found,
+        rank,
+        latencyMs,
+        topResultTitle: String(topTitle),
+        matchedKeywords,
+        missedKeywords,
       });
 
-      // The "with memory" path should find the answer
-      // (we log but don't hard-fail — the report will show the score)
+      // The search should find the answer — log but don't hard-fail
+      // (the report will show the score)
       if (!found) {
         console.warn(
           `  ⚠ MISS: "${q.question}" — missed keywords: ${missedKeywords.join(', ')}`,
@@ -325,16 +314,16 @@ describe('1. Recall Accuracy — With Memory vs Without Memory', () => {
 
 describe('2. Search Relevance — Ranking Quality', () => {
   it('computes hit rates at different K values', () => {
-    const withMemoryResults = benchmarkResults.filter((r) => r.withMemory.found);
+    const foundResults = benchmarkResults.filter((r) => r.found);
 
-    const top1Hits = withMemoryResults.filter((r) => r.withMemory.rank === 1).length;
-    const top3Hits = withMemoryResults.filter(
-      (r) => r.withMemory.rank !== null && r.withMemory.rank <= 3,
+    const top1Hits = foundResults.filter((r) => r.rank === 1).length;
+    const top3Hits = foundResults.filter(
+      (r) => r.rank !== null && r.rank <= 3,
     ).length;
-    const top5Hits = withMemoryResults.filter(
-      (r) => r.withMemory.rank !== null && r.withMemory.rank <= 5,
+    const top5Hits = foundResults.filter(
+      (r) => r.rank !== null && r.rank <= 5,
     ).length;
-    const topKHits = withMemoryResults.length;
+    const topKHits = foundResults.length;
 
     const total = BENCHMARK_QUESTIONS.length;
 
@@ -587,18 +576,14 @@ describe('5. Concurrent Load — Simulated Hook Burst', () => {
 describe('BENCHMARK REPORT', () => {
   it('generates final performance report', () => {
     const total = benchmarkResults.length;
-    const withMemoryHits = benchmarkResults.filter((r) => r.withMemory.found).length;
-    const withoutMemoryHits = 0; // Baseline is always 0 — no memory means no recall
-
-    const withMemoryPct = ((withMemoryHits / total) * 100).toFixed(1);
-    const withoutMemoryPct = '0.0';
-    const improvement = withMemoryPct; // Delta from 0%
+    const hits = benchmarkResults.filter((r) => r.found).length;
+    const recallPct = ((hits / total) * 100).toFixed(1);
 
     // Category breakdown
     const categories = [...new Set(benchmarkResults.map((r) => r.category))];
     const categoryStats = categories.map((cat) => {
       const catResults = benchmarkResults.filter((r) => r.category === cat);
-      const catHits = catResults.filter((r) => r.withMemory.found).length;
+      const catHits = catResults.filter((r) => r.found).length;
       return {
         category: cat,
         total: catResults.length,
@@ -628,23 +613,31 @@ describe('BENCHMARK REPORT', () => {
       ? Math.round(contextLatencies.reduce((a, b) => a + b, 0) / contextLatencies.length)
       : 0;
 
-    // Rank distribution
+    // Ranking metrics
     const ranks = benchmarkResults
-      .filter((r) => r.withMemory.rank !== null)
-      .map((r) => r.withMemory.rank!);
+      .filter((r) => r.rank !== null)
+      .map((r) => r.rank!);
     const avgRank = ranks.length > 0
       ? (ranks.reduce((a, b) => a + b, 0) / ranks.length).toFixed(1)
       : 'N/A';
+
+    // MRR = mean of 1/rank for found items, 0 for misses
+    const reciprocalRanks = benchmarkResults.map((r) =>
+      r.rank !== null ? 1 / r.rank : 0,
+    );
+    const mrr = (reciprocalRanks.reduce((a, b) => a + b, 0) / total).toFixed(3);
+
+    const top1 = benchmarkResults.filter((r) => r.rank === 1).length;
+    const top3 = benchmarkResults.filter((r) => r.rank !== null && r.rank <= 3).length;
+    const top5 = benchmarkResults.filter((r) => r.rank !== null && r.rank <= 5).length;
 
     console.log('\n');
     console.log('╔════════════════════════════════════════════════════════════════╗');
     console.log('║              agent-mem PERFORMANCE BENCHMARK REPORT           ║');
     console.log('╠════════════════════════════════════════════════════════════════╣');
     console.log('║                                                              ║');
-    console.log('║  RECALL ACCURACY                                             ║');
-    console.log(`║    Without Memory (baseline):  ${withoutMemoryPct.padStart(5)}%  (0/${total})`.padEnd(65) + '║');
-    console.log(`║    With Memory (agent-mem):    ${withMemoryPct.padStart(5)}%  (${withMemoryHits}/${total})`.padEnd(65) + '║');
-    console.log(`║    ▲ Improvement:             +${improvement}%`.padEnd(65) + '║');
+    console.log('║  SEARCH RECALL (Top-10)                                      ║');
+    console.log(`║    Recall@10:   ${recallPct.padStart(5)}%  (${hits}/${total} queries found answer)`.padEnd(65) + '║');
     console.log('║                                                              ║');
     console.log('║  CATEGORY BREAKDOWN                                          ║');
     for (const cs of categoryStats) {
@@ -652,12 +645,13 @@ describe('BENCHMARK REPORT', () => {
       console.log(line.padEnd(65) + '║');
     }
     console.log('║                                                              ║');
-    console.log('║  SEARCH RELEVANCE                                            ║');
-    console.log(`║    Average Rank of Correct Answer: ${String(avgRank).padStart(4)}`.padEnd(65) + '║');
-    const top1 = benchmarkResults.filter((r) => r.withMemory.rank === 1).length;
-    const top3 = benchmarkResults.filter((r) => r.withMemory.rank !== null && r.withMemory.rank <= 3).length;
+    console.log('║  RANKING QUALITY                                             ║');
+    console.log(`║    MRR (Mean Reciprocal Rank):   ${mrr.padStart(5)}`.padEnd(65) + '║');
+    console.log(`║    Average Rank of Hit:          ${String(avgRank).padStart(5)}`.padEnd(65) + '║');
     console.log(`║    Top-1 Hit Rate:               ${((top1 / total) * 100).toFixed(1).padStart(5)}%`.padEnd(65) + '║');
     console.log(`║    Top-3 Hit Rate:               ${((top3 / total) * 100).toFixed(1).padStart(5)}%`.padEnd(65) + '║');
+    console.log(`║    Top-5 Hit Rate:               ${((top5 / total) * 100).toFixed(1).padStart(5)}%`.padEnd(65) + '║');
+    console.log(`║    Top-10 Hit Rate:              ${recallPct.padStart(5)}%`.padEnd(65) + '║');
     console.log('║                                                              ║');
     console.log('║  LATENCY (avg)                                               ║');
     console.log(`║    Semantic Search:     ${String(avgSearch).padStart(5)}ms`.padEnd(65) + '║');
@@ -679,16 +673,16 @@ describe('BENCHMARK REPORT', () => {
       console.log('║                                                              ║');
     }
 
-    console.log('║  MISSED QUESTIONS                                            ║');
-    const misses = benchmarkResults.filter((r) => !r.withMemory.found);
+    console.log('║  MISSED QUERIES                                              ║');
+    const misses = benchmarkResults.filter((r) => !r.found);
     if (misses.length === 0) {
       console.log('║    (none — perfect recall)'.padEnd(65) + '║');
     } else {
       for (const m of misses) {
         const short = m.question.length > 50 ? m.question.slice(0, 47) + '...' : m.question;
         console.log(`║    ✘ ${short}`.padEnd(65) + '║');
-        if (m.withMemory.missedKeywords.length > 0) {
-          console.log(`║      missed: ${m.withMemory.missedKeywords.join(', ')}`.padEnd(65) + '║');
+        if (m.missedKeywords.length > 0) {
+          console.log(`║      missed: ${m.missedKeywords.join(', ')}`.padEnd(65) + '║');
         }
       }
     }
@@ -696,7 +690,7 @@ describe('BENCHMARK REPORT', () => {
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
 
-    // The test passes if recall is meaningfully above 0%
-    expect(Number(withMemoryPct)).toBeGreaterThan(0);
+    // The test passes if recall is meaningfully above 50%
+    expect(Number(recallPct)).toBeGreaterThan(50);
   });
 });
